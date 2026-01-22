@@ -1,0 +1,41 @@
+[package]
+name = "openlr_decoder"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Fast OpenLR location reference decoder"
+repository = "https://github.com/replicahq/openlr-decoder"
+keywords = ["openlr", "location", "gis", "map-matching"]
+
+[lib]
+name = "openlr_decoder"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+openlr = "0.4"
+petgraph = "0.6"
+rstar = "0.12"
+geo = { version = "0.28", features = ["serde"] }
+geo-types = { version = "0.7", features = ["serde"] }
+parquet = { version = "57", features = ["arrow"] }
+arrow = { version = "57", features = ["ffi", "pyarrow"] }
+geoarrow = { version = "0.3", optional = true }
+geozero = { version = "0.14", features = ["with-wkb", "with-geo"] }
+rayon = "1.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+pyo3 = { version = "0.26", features = ["extension-module"], optional = true }
+
+[features]
+default = []
+python = ["pyo3"]
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
