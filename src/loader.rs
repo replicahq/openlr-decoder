@@ -5,13 +5,13 @@ use std::fs::File;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use arrow::array::{Array, Float64Array, Int64Array, UInt64Array, StringArray, BinaryArray};
+use arrow::array::{Array, BinaryArray, Float64Array, Int64Array, StringArray, UInt64Array};
 use geo::{LineString, Point};
 use geozero::wkb;
 use geozero::ToGeo;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
-use crate::graph::{Edge, Frc, Fow, Node, RoadNetwork};
+use crate::graph::{Edge, Fow, Frc, Node, RoadNetwork};
 use crate::spatial::{EdgeEnvelope, SpatialIndex};
 
 /// Load a road network from a parquet file with the BigQuery export schema
@@ -81,13 +81,37 @@ pub fn load_network_from_parquet(path: &Path) -> Result<(RoadNetwork, SpatialInd
             .and_then(|c| c.as_any().downcast_ref::<BinaryArray>());
 
         // All required columns must be present
-        let (stable_edge_id, start_vertex, end_vertex, start_lat, start_lon, end_lat, end_lon, highway) =
-            match (stable_edge_id, start_vertex, end_vertex, start_lat, start_lon, end_lat, end_lon, highway) {
-                (Some(eid), Some(sv), Some(ev), Some(slat), Some(slon), Some(elat), Some(elon), Some(hw)) => {
-                    (eid, sv, ev, slat, slon, elat, elon, hw)
-                }
-                _ => continue, // Skip batch if missing required columns
-            };
+        let (
+            stable_edge_id,
+            start_vertex,
+            end_vertex,
+            start_lat,
+            start_lon,
+            end_lat,
+            end_lon,
+            highway,
+        ) = match (
+            stable_edge_id,
+            start_vertex,
+            end_vertex,
+            start_lat,
+            start_lon,
+            end_lat,
+            end_lon,
+            highway,
+        ) {
+            (
+                Some(eid),
+                Some(sv),
+                Some(ev),
+                Some(slat),
+                Some(slon),
+                Some(elat),
+                Some(elon),
+                Some(hw),
+            ) => (eid, sv, ev, slat, slon, elat, elon, hw),
+            _ => continue, // Skip batch if missing required columns
+        };
 
         for row in 0..batch.num_rows() {
             // Skip nulls
@@ -104,14 +128,14 @@ pub fn load_network_from_parquet(path: &Path) -> Result<(RoadNetwork, SpatialInd
             let ev_lon = end_lon.value(row);
 
             // Create nodes if not seen
-            if !seen_nodes.contains_key(&sv_id) {
+            if let std::collections::hash_map::Entry::Vacant(e) = seen_nodes.entry(sv_id) {
                 let coord = Point::new(sv_lon, sv_lat);
-                seen_nodes.insert(sv_id, coord);
+                e.insert(coord);
                 network.add_node(Node { id: sv_id, coord });
             }
-            if !seen_nodes.contains_key(&ev_id) {
+            if let std::collections::hash_map::Entry::Vacant(e) = seen_nodes.entry(ev_id) {
                 let coord = Point::new(ev_lon, ev_lat);
-                seen_nodes.insert(ev_id, coord);
+                e.insert(coord);
                 network.add_node(Node { id: ev_id, coord });
             }
 
@@ -123,7 +147,13 @@ pub fn load_network_from_parquet(path: &Path) -> Result<(RoadNetwork, SpatialInd
             };
             let frc = Frc::from_osm_highway(hw_tag);
 
-            let lane_count = lanes.map(|l| if l.is_null(row) { None } else { Some(l.value(row) as u8) }).flatten();
+            let lane_count = lanes.and_then(|l| {
+                if l.is_null(row) {
+                    None
+                } else {
+                    Some(l.value(row) as u8)
+                }
+            });
             let fow = Fow::from_osm_tags(hw_tag, None, None, lane_count);
 
             // Parse geometry

@@ -20,7 +20,6 @@ geo = { version = "0.28", features = ["serde"] }
 geo-types = { version = "0.7", features = ["serde"] }
 parquet = { version = "57", features = ["arrow"] }
 arrow = { version = "57", features = ["ffi", "pyarrow"] }
-geoarrow = { version = "0.3", optional = true }
 geozero = { version = "0.14", features = ["with-wkb", "with-geo"] }
 rayon = "1.10"
 serde = { version = "1", features = ["derive"] }

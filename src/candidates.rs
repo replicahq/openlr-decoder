@@ -1,19 +1,19 @@
 use geo::Point;
 use petgraph::graph::EdgeIndex;
 
-use crate::graph::{Frc, Fow, RoadNetwork};
+use crate::graph::{Fow, Frc, RoadNetwork};
 use crate::spatial::{bearing_at_projection, bearing_difference, SpatialIndex};
 
 /// A candidate edge for matching an LRP
 #[derive(Debug, Clone)]
 pub struct Candidate {
     pub edge_idx: EdgeIndex,
-    pub distance_m: f64,           // Distance from LRP to edge
-    pub bearing_diff: f64,         // Bearing difference in degrees
-    pub frc_diff: u8,              // FRC difference (0 = exact match)
-    pub fow_compatible: bool,      // FOW compatibility
-    pub score: f64,                // Combined score (lower is better)
-    pub projection_fraction: f64,  // Where on the edge the LRP projects (0-1)
+    pub distance_m: f64,          // Distance from LRP to edge
+    pub bearing_diff: f64,        // Bearing difference in degrees
+    pub frc_diff: u8,             // FRC difference (0 = exact match)
+    pub fow_compatible: bool,     // FOW compatibility
+    pub score: f64,               // Combined score (lower is better)
+    pub projection_fraction: f64, // Where on the edge the LRP projects (0-1)
 }
 
 /// Configuration for candidate scoring
@@ -32,17 +32,17 @@ pub struct CandidateConfig {
 impl Default for CandidateConfig {
     fn default() -> Self {
         CandidateConfig {
-            search_radius_m: 100.0,     // 100m search radius
-            max_bearing_diff: 30.0,      // ±30 degrees bearing tolerance
-            frc_tolerance: 2,            // Allow ±2 FRC classes
-            max_candidates: 10,          // Keep top 10 candidates
+            search_radius_m: 100.0, // 100m search radius
+            max_bearing_diff: 30.0, // ±30 degrees bearing tolerance
+            frc_tolerance: 2,       // Allow ±2 FRC classes
+            max_candidates: 10,     // Keep top 10 candidates
             // Scoring weights for cross-provider decoding (HERE → OSM):
             // Distance strongly dominates - LRP should be on top of the correct road
             // Bearing helps distinguish parallel roads going different directions
             // FRC is just a tiebreaker since mappings between providers differ
-            distance_weight: 4.0,        // Primary - closest road strongly wins
-            bearing_weight: 0.2,         // Minor tiebreaker for parallel roads
-            frc_weight: 0.1,             // Minimal - FRC mappings are very approximate
+            distance_weight: 4.0, // Primary - closest road strongly wins
+            bearing_weight: 0.2,  // Minor tiebreaker for parallel roads
+            frc_weight: 0.1,      // Minimal - FRC mappings are very approximate
         }
     }
 }
@@ -87,15 +87,11 @@ pub fn find_candidates(
             }
 
             // Compute projection fraction
-            let projection_fraction = crate::spatial::project_point_to_line_fraction(coord, &env.geometry);
+            let projection_fraction =
+                crate::spatial::project_point_to_line_fraction(coord, &env.geometry);
 
             // Compute score (lower is better)
-            let score = compute_score(
-                distance_m,
-                bearing_diff,
-                frc_diff,
-                config,
-            );
+            let score = compute_score(distance_m, bearing_diff, frc_diff, config);
 
             Some(Candidate {
                 edge_idx: env.edge_idx,

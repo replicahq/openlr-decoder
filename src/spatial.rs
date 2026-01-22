@@ -1,5 +1,5 @@
+use geo::{Closest, HaversineClosestPoint, HaversineDistance};
 use geo::{Coord, LineString, Point};
-use geo::{HaversineDistance, HaversineClosestPoint, Closest};
 use petgraph::graph::EdgeIndex;
 use rstar::{RTree, RTreeObject, AABB};
 
@@ -108,7 +108,11 @@ impl SpatialIndex {
     }
 
     /// Find edges within radius, sorted by distance to query point
-    pub fn find_within_radius(&self, center: Point<f64>, radius_m: f64) -> Vec<(&EdgeEnvelope, f64)> {
+    pub fn find_within_radius(
+        &self,
+        center: Point<f64>,
+        radius_m: f64,
+    ) -> Vec<(&EdgeEnvelope, f64)> {
         let candidates = self.find_nearby(center, radius_m * 1.5); // Slight buffer for bbox approximation
 
         let mut results: Vec<_> = candidates
@@ -190,7 +194,11 @@ pub fn project_point_to_line_fraction(point: Point<f64>, line: &LineString<f64>)
 }
 
 /// Project a point onto a line segment, returns (closest_point, fraction_along_segment)
-fn project_point_to_segment(point: Point<f64>, p1: Point<f64>, p2: Point<f64>) -> (Point<f64>, f64) {
+fn project_point_to_segment(
+    point: Point<f64>,
+    p1: Point<f64>,
+    p2: Point<f64>,
+) -> (Point<f64>, f64) {
     let dx = p2.x() - p1.x();
     let dy = p2.y() - p1.y();
 
@@ -233,7 +241,10 @@ pub fn bearing_at_projection(point: Point<f64>, line: &LineString<f64>) -> f64 {
 
     // Calculate bearing of the best segment
     let p1 = Point::new(coords[best_segment_idx].x, coords[best_segment_idx].y);
-    let p2 = Point::new(coords[best_segment_idx + 1].x, coords[best_segment_idx + 1].y);
+    let p2 = Point::new(
+        coords[best_segment_idx + 1].x,
+        coords[best_segment_idx + 1].y,
+    );
 
     let bearing = p1.geodesic_bearing(p2);
     // Normalize to 0-360
