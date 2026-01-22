@@ -5,4 +5,4 @@
 !_TAG_PROGRAM_URL	http://ctags.sourceforge.net	/official site/
 !_TAG_PROGRAM_VERSION	5.8	//
 __all__	python/openlr_decoder/__init__.py	/^__all__ = [$/;"	v
-__version__	python/openlr_decoder/__init__.py	/^__version__ = "0.1.0"$/;"	v
+__version__	python/openlr_decoder/__init__.py	/^__version__ = "0.1.1"$/;"	v
