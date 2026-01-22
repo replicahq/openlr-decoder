@@ -37,7 +37,7 @@ The road network Parquet file must contain these columns:
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `edge_id` | int64 | Unique edge identifier |
+| `edge_id` | uint64 | Unique edge identifier |
 | `start_node` | int64 | Start node identifier |
 | `end_node` | int64 | End node identifier |
 | `length` | float64 | Edge length in meters |
