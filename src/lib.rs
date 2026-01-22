@@ -1,14 +1,14 @@
-pub mod graph;
-pub mod spatial;
 pub mod candidates;
 pub mod decoder;
+pub mod graph;
 pub mod loader;
+pub mod spatial;
 
 #[cfg(feature = "python")]
 mod python;
 
 pub use candidates::{find_candidates, Candidate, CandidateConfig};
-pub use decoder::{Decoder, DecodeError, DecodedPath, DecoderConfig};
-pub use graph::{RoadNetwork, Edge, Node, Frc, Fow};
+pub use decoder::{DecodeError, DecodedPath, Decoder, DecoderConfig};
+pub use graph::{Edge, Fow, Frc, Node, RoadNetwork};
 pub use loader::{load_network_from_parquet, load_openlr_codes};
 pub use spatial::SpatialIndex;

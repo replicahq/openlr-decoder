@@ -1,5 +1,5 @@
-use geo::{LineString, Point, GeodesicLength, GeodesicBearing};
-use petgraph::graph::{DiGraph, NodeIndex, EdgeIndex};
+use geo::{GeodesicBearing, GeodesicLength, LineString, Point};
+use petgraph::graph::{DiGraph, EdgeIndex, NodeIndex};
 use petgraph::visit::EdgeRef;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -48,7 +48,9 @@ impl Frc {
             "motorway_link" | "trunk_link" | "primary_link" => Frc::Frc3,
             // HERE classifies service roads and unclassified roads as FRC 4
             // (unclassified = minor public roads, typically local connections)
-            "tertiary" | "secondary_link" | "tertiary_link" | "service" | "unclassified" => Frc::Frc4,
+            "tertiary" | "secondary_link" | "tertiary_link" | "service" | "unclassified" => {
+                Frc::Frc4
+            }
             // Track roads and residential - minor local roads
             "residential" | "track" => Frc::Frc5,
             "living_street" => Frc::Frc6,
@@ -92,14 +94,20 @@ impl Fow {
     }
 
     /// Map OSM tags to FOW
-    pub fn from_osm_tags(highway: &str, junction: Option<&str>, oneway: Option<&str>, lanes: Option<u8>) -> Self {
+    pub fn from_osm_tags(
+        highway: &str,
+        junction: Option<&str>,
+        oneway: Option<&str>,
+        lanes: Option<u8>,
+    ) -> Self {
         if junction == Some("roundabout") {
             return Fow::Roundabout;
         }
 
         match highway {
             "motorway" => Fow::Motorway,
-            "motorway_link" | "trunk_link" | "primary_link" | "secondary_link" | "tertiary_link" => Fow::SlipRoad,
+            "motorway_link" | "trunk_link" | "primary_link" | "secondary_link"
+            | "tertiary_link" => Fow::SlipRoad,
             "trunk" | "primary" | "secondary" => {
                 // Multiple carriageway if has many lanes or is oneway with parallel road
                 if lanes.unwrap_or(1) >= 4 || oneway == Some("yes") {
@@ -141,7 +149,7 @@ pub struct Node {
 /// An edge in the road network (road segment)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Edge {
-    pub id: u64,  // stableEdgeId from the source data
+    pub id: u64, // stableEdgeId from the source data
     pub geometry: LineString<f64>,
     pub length_m: f64,
     pub frc: Frc,
@@ -223,9 +231,13 @@ impl RoadNetwork {
 
     /// Add an edge to the network
     pub fn add_edge(&mut self, from_node: i64, to_node: i64, edge: Edge) -> EdgeIndex {
-        let from_idx = *self.node_id_to_index.get(&from_node)
+        let from_idx = *self
+            .node_id_to_index
+            .get(&from_node)
             .expect("from_node must exist");
-        let to_idx = *self.node_id_to_index.get(&to_node)
+        let to_idx = *self
+            .node_id_to_index
+            .get(&to_node)
             .expect("to_node must exist");
 
         let edge_id = edge.id;

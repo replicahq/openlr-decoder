@@ -7,7 +7,7 @@ use petgraph::visit::EdgeRef;
 use thiserror::Error;
 
 use crate::candidates::{find_candidates, Candidate, CandidateConfig};
-use crate::graph::{Frc, Fow, RoadNetwork};
+use crate::graph::{Fow, Frc, RoadNetwork};
 use crate::spatial::SpatialIndex;
 
 /// A* search node for the priority queue
@@ -175,9 +175,9 @@ impl Default for DecoderConfig {
     fn default() -> Self {
         DecoderConfig {
             candidate_config: CandidateConfig::default(),
-            length_tolerance: 0.35,             // 35% tolerance on path length (for cross-provider decoding)
-            absolute_length_tolerance: 100.0,   // 100m absolute tolerance
-            max_search_distance_factor: 2.0,    // Search up to 2x the expected distance
+            length_tolerance: 0.35, // 35% tolerance on path length (for cross-provider decoding)
+            absolute_length_tolerance: 100.0, // 100m absolute tolerance
+            max_search_distance_factor: 2.0, // Search up to 2x the expected distance
         }
     }
 }
@@ -363,7 +363,8 @@ impl<'a> Decoder<'a> {
             .map(|p| p.dnp.meters())
             .unwrap_or(0.0);
 
-        let (path, total_length) = self.find_best_path(&all_candidates[0], &all_candidates[1], expected_distance, 0)?;
+        let (path, total_length) =
+            self.find_best_path(&all_candidates[0], &all_candidates[1], expected_distance, 0)?;
 
         let positive_offset_m = pal.offset.range();
 
@@ -442,7 +443,7 @@ impl<'a> Decoder<'a> {
                         let excellent_spatial_match =
                             start_cand.distance_m < 5.0 && end_cand.distance_m < 5.0;
                         let relaxed_max = if excellent_spatial_match {
-                            max_valid_distance * 3.0  // Allow up to 3x for very close matches
+                            max_valid_distance * 3.0 // Allow up to 3x for very close matches
                         } else {
                             max_valid_distance
                         };
@@ -530,22 +531,21 @@ impl<'a> Decoder<'a> {
             }
 
             // Score the path (additive for final ranking)
-            let length_diff =
-                (path_cost - expected_distance).abs() / expected_distance.max(1.0);
+            let length_diff = (path_cost - expected_distance).abs() / expected_distance.max(1.0);
             let score = start_cand.score + end_cand.score + length_diff;
 
-                if score < best_score {
-                    best_score = score;
-                    best_path = Some((edges, path_cost));
+            if score < best_score {
+                best_score = score;
+                best_path = Some((edges, path_cost));
 
-                    // Early termination: if we found a good match, stop searching
-                    // Since pairs are sorted by candidate quality, the first valid
-                    // path with good length match is likely optimal
-                    if length_diff < 0.1 {
-                        // Path length within 10% of expected
-                        break;
-                    }
+                // Early termination: if we found a good match, stop searching
+                // Since pairs are sorted by candidate quality, the first valid
+                // path with good length match is likely optimal
+                if length_diff < 0.1 {
+                    // Path length within 10% of expected
+                    break;
                 }
+            }
         }
 
         best_path.ok_or(DecodeError::NoPath {
