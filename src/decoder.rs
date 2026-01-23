@@ -7,7 +7,7 @@ use petgraph::visit::EdgeRef;
 use thiserror::Error;
 
 use crate::candidates::{find_candidates, Candidate, CandidateConfig};
-use crate::graph::{Frc, Fow, RoadNetwork};
+use crate::graph::{Fow, Frc, RoadNetwork};
 use crate::spatial::SpatialIndex;
 
 /// A* search node for the priority queue
@@ -175,9 +175,9 @@ impl Default for DecoderConfig {
     fn default() -> Self {
         DecoderConfig {
             candidate_config: CandidateConfig::default(),
-            length_tolerance: 0.35,             // 35% tolerance on path length (for cross-provider decoding)
-            absolute_length_tolerance: 100.0,   // 100m absolute tolerance
-            max_search_distance_factor: 2.0,    // Search up to 2x the expected distance
+            length_tolerance: 0.35, // 35% tolerance on path length (for cross-provider decoding)
+            absolute_length_tolerance: 100.0, // 100m absolute tolerance
+            max_search_distance_factor: 2.0, // Search up to 2x the expected distance
         }
     }
 }
@@ -363,7 +363,8 @@ impl<'a> Decoder<'a> {
             .map(|p| p.dnp.meters())
             .unwrap_or(0.0);
 
-        let (path, total_length) = self.find_best_path(&all_candidates[0], &all_candidates[1], expected_distance, 0)?;
+        let (path, total_length) =
+            self.find_best_path(&all_candidates[0], &all_candidates[1], expected_distance, 0)?;
 
         let positive_offset_m = pal.offset.range();
 
@@ -373,6 +374,74 @@ impl<'a> Decoder<'a> {
             positive_offset_m,
             negative_offset_m: 0.0,
         })
+    }
+
+    /// Check if a single edge can serve both LRPs (same-edge solution)
+    /// This is prioritized over multi-edge paths to avoid including edges
+    /// that contribute nearly zero length to the final path.
+    fn try_same_edge_solution(
+        &self,
+        start_candidates: &[Candidate],
+        end_candidates: &[Candidate],
+        expected_distance: f64,
+        min_distance: f64,
+        max_valid_distance: f64,
+    ) -> Option<(Vec<EdgeIndex>, f64)> {
+        // Find edges that appear in both candidate lists
+        // Only consider candidates with good spatial match (within 10m)
+        const MAX_PROJECTION_DISTANCE: f64 = 10.0;
+
+        let mut best_same_edge: Option<(Vec<EdgeIndex>, f64, f64)> = None; // (edges, length, score)
+
+        for start_cand in start_candidates.iter().take(10) {
+            if start_cand.distance_m > MAX_PROJECTION_DISTANCE {
+                continue;
+            }
+
+            for end_cand in end_candidates.iter().take(10) {
+                if end_cand.distance_m > MAX_PROJECTION_DISTANCE {
+                    continue;
+                }
+
+                // Check if same edge
+                if start_cand.edge_idx != end_cand.edge_idx {
+                    continue;
+                }
+
+                let edge = self.network.edge(start_cand.edge_idx)?;
+
+                // Check projection order (end must be after start)
+                let frac_diff = end_cand.projection_fraction - start_cand.projection_fraction;
+                if frac_diff <= 0.0 {
+                    continue;
+                }
+
+                let path_cost = edge.length_m * frac_diff;
+
+                // For same-edge with excellent spatial match, allow relaxed length tolerance
+                let excellent_match = start_cand.distance_m < 5.0 && end_cand.distance_m < 5.0;
+                let effective_max = if excellent_match {
+                    max_valid_distance * 3.0
+                } else {
+                    max_valid_distance
+                };
+
+                if path_cost < min_distance || path_cost > effective_max {
+                    continue;
+                }
+
+                let length_diff =
+                    (path_cost - expected_distance).abs() / expected_distance.max(1.0);
+                let score = start_cand.score + end_cand.score + length_diff;
+
+                // Track the best same-edge solution
+                if best_same_edge.is_none() || score < best_same_edge.as_ref().unwrap().2 {
+                    best_same_edge = Some((vec![start_cand.edge_idx], path_cost, score));
+                }
+            }
+        }
+
+        best_same_edge.map(|(edges, length, _score)| (edges, length))
     }
 
     /// Find the best path between candidate sets
@@ -404,6 +473,20 @@ impl<'a> Decoder<'a> {
         // to handle short segments where 2x might be too restrictive
         let max_search_distance =
             (expected_distance * self.config.max_search_distance_factor).max(500.0);
+
+        // PRIORITY CHECK: Look for same-edge solutions first
+        // When both LRPs project closely onto the same edge, prefer this simpler solution
+        // over multi-edge paths that may score slightly better on individual candidates
+        // but include edges contributing nearly zero length.
+        if let Some(result) = self.try_same_edge_solution(
+            start_candidates,
+            end_candidates,
+            expected_distance,
+            min_distance,
+            max_valid_distance,
+        ) {
+            return Ok(result);
+        }
 
         // Build and sort candidate pairs by combined score (multiplicative)
         // Multiplicative scoring strongly penalizes pairs where either candidate is poor
@@ -442,7 +525,7 @@ impl<'a> Decoder<'a> {
                         let excellent_spatial_match =
                             start_cand.distance_m < 5.0 && end_cand.distance_m < 5.0;
                         let relaxed_max = if excellent_spatial_match {
-                            max_valid_distance * 3.0  // Allow up to 3x for very close matches
+                            max_valid_distance * 3.0 // Allow up to 3x for very close matches
                         } else {
                             max_valid_distance
                         };
@@ -530,22 +613,21 @@ impl<'a> Decoder<'a> {
             }
 
             // Score the path (additive for final ranking)
-            let length_diff =
-                (path_cost - expected_distance).abs() / expected_distance.max(1.0);
+            let length_diff = (path_cost - expected_distance).abs() / expected_distance.max(1.0);
             let score = start_cand.score + end_cand.score + length_diff;
 
-                if score < best_score {
-                    best_score = score;
-                    best_path = Some((edges, path_cost));
+            if score < best_score {
+                best_score = score;
+                best_path = Some((edges, path_cost));
 
-                    // Early termination: if we found a good match, stop searching
-                    // Since pairs are sorted by candidate quality, the first valid
-                    // path with good length match is likely optimal
-                    if length_diff < 0.1 {
-                        // Path length within 10% of expected
-                        break;
-                    }
+                // Early termination: if we found a good match, stop searching
+                // Since pairs are sorted by candidate quality, the first valid
+                // path with good length match is likely optimal
+                if length_diff < 0.1 {
+                    // Path length within 10% of expected
+                    break;
                 }
+            }
         }
 
         best_path.ok_or(DecodeError::NoPath {

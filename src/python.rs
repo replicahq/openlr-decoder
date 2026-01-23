@@ -3,9 +3,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{
-    ArrayRef, Float64Builder, ListBuilder, StringBuilder, UInt64Builder,
-};
+use arrow::array::{ArrayRef, Float64Builder, ListBuilder, StringBuilder, UInt64Builder};
 use arrow::pyarrow::ToPyArrow;
 use arrow::record_batch::RecordBatch;
 use pyo3::exceptions::PyValueError;
@@ -13,8 +11,8 @@ use pyo3::prelude::*;
 use pyo3::Py;
 use rayon::prelude::*;
 
-use crate::decoder::{DecodeError, DecodedPath, Decoder, DecoderConfig};
 use crate::candidates::CandidateConfig;
+use crate::decoder::{DecodeError, DecodedPath, Decoder, DecoderConfig};
 use crate::graph::RoadNetwork;
 use crate::loader::load_network_from_parquet;
 use crate::spatial::SpatialIndex;
@@ -236,8 +234,7 @@ impl PyDecoder {
     /// Raises:
     ///     ValueError: If decoding fails
     fn decode(&self, openlr_base64: &str) -> PyResult<PyDecodedPath> {
-        let decoder = Decoder::new(&self.network, &self.spatial)
-            .with_config(self.config.clone());
+        let decoder = Decoder::new(&self.network, &self.spatial).with_config(self.config.clone());
 
         decoder
             .decode(openlr_base64)
@@ -267,8 +264,7 @@ impl PyDecoder {
             openlr_codes
                 .par_iter()
                 .map(|code| {
-                    let decoder = Decoder::new(network, spatial)
-                        .with_config(config.clone());
+                    let decoder = Decoder::new(network, spatial).with_config(config.clone());
                     decoder.decode(code)
                 })
                 .collect()
@@ -334,7 +330,10 @@ fn decode_error_message(err: DecodeError) -> String {
     match err {
         DecodeError::Deserialize(msg) => format!("Invalid OpenLR: {}", msg),
         DecodeError::NoCandidates { index } => {
-            format!("No matching roads found for location reference point {}", index)
+            format!(
+                "No matching roads found for location reference point {}",
+                index
+            )
         }
         DecodeError::NoPath { from, to } => {
             format!("No valid path found between points {} and {}", from, to)
