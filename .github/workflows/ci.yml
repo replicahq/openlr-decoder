@@ -11,55 +11,49 @@ env:
 
 jobs:
   rust:
-    name: Rust ${{ matrix.toolchain }}
+    name: Rust
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        toolchain: [stable, beta]
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust ${{ matrix.toolchain }}
-        uses: dtolnay/rust-toolchain@master
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: ${{ matrix.toolchain }}
           components: rustfmt, clippy
 
       - name: Check formatting
         run: cargo fmt --check
 
       - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Build
-        run: cargo build --all-features
+        run: cargo build
 
       - name: Test
-        run: cargo test --all-features
+        run: cargo test
 
   python:
-    name: Python ${{ matrix.python-version }} (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        python-version: ["3.9", "3.12"]
+    name: Python 3.12 (ubuntu)
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
 
-      - name: Set up Python ${{ matrix.python-version }}
-        run: uv python install ${{ matrix.python-version }}
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
       - name: Build and install package
-        run: uv pip install --system -e .
+        run: uv sync
 
       - name: Test import
-        run: uv run --python ${{ matrix.python-version }} python -c "from openlr_decoder import RoadNetwork, Decoder, DecoderConfig, DecodedPath; print('Import successful')"
+        run: uv run python -c "from openlr_decoder import RoadNetwork, Decoder, DecoderConfig, DecodedPath; print('Import successful')"

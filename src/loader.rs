@@ -128,14 +128,14 @@ pub fn load_network_from_parquet(path: &Path) -> Result<(RoadNetwork, SpatialInd
             let ev_lon = end_lon.value(row);
 
             // Create nodes if not seen
-            if !seen_nodes.contains_key(&sv_id) {
+            if let std::collections::hash_map::Entry::Vacant(e) = seen_nodes.entry(sv_id) {
                 let coord = Point::new(sv_lon, sv_lat);
-                seen_nodes.insert(sv_id, coord);
+                e.insert(coord);
                 network.add_node(Node { id: sv_id, coord });
             }
-            if !seen_nodes.contains_key(&ev_id) {
+            if let std::collections::hash_map::Entry::Vacant(e) = seen_nodes.entry(ev_id) {
                 let coord = Point::new(ev_lon, ev_lat);
-                seen_nodes.insert(ev_id, coord);
+                e.insert(coord);
                 network.add_node(Node { id: ev_id, coord });
             }
 
@@ -147,15 +147,13 @@ pub fn load_network_from_parquet(path: &Path) -> Result<(RoadNetwork, SpatialInd
             };
             let frc = Frc::from_osm_highway(hw_tag);
 
-            let lane_count = lanes
-                .map(|l| {
-                    if l.is_null(row) {
-                        None
-                    } else {
-                        Some(l.value(row) as u8)
-                    }
-                })
-                .flatten();
+            let lane_count = lanes.and_then(|l| {
+                if l.is_null(row) {
+                    None
+                } else {
+                    Some(l.value(row) as u8)
+                }
+            });
             let fow = Fow::from_osm_tags(hw_tag, None, None, lane_count);
 
             // Parse geometry

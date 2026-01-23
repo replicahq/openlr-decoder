@@ -211,10 +211,7 @@ impl PyDecoder {
     #[new]
     #[pyo3(signature = (network, config = None))]
     fn new(network: &PyRoadNetwork, config: Option<PyDecoderConfig>) -> Self {
-        let decoder_config = config
-            .as_ref()
-            .map(|c| DecoderConfig::from(c))
-            .unwrap_or_default();
+        let decoder_config = config.as_ref().map(DecoderConfig::from).unwrap_or_default();
 
         PyDecoder {
             network: Arc::clone(&network.network),
