@@ -4,6 +4,9 @@ pub mod graph;
 pub mod loader;
 pub mod spatial;
 
+#[cfg(test)]
+pub mod test_utils;
+
 #[cfg(feature = "python")]
 mod python;
 
