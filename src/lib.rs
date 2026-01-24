@@ -13,8 +13,5 @@ mod python;
 pub use candidates::{find_candidates, Candidate, CandidateConfig};
 pub use decoder::{DecodeError, DecodedPath, Decoder, DecoderConfig};
 pub use graph::{Edge, Fow, Frc, Node, RoadNetwork};
-pub use loader::{
-    load_network_from_parquet, load_network_from_parquet_with_mode, load_openlr_codes,
-    road_network_schema,
-};
-pub use spatial::{SpatialIndex, SpatialIndexMode};
+pub use loader::{load_network_from_parquet, load_openlr_codes, road_network_schema};
+pub use spatial::SpatialIndex;

@@ -13,7 +13,7 @@ use geozero::ToGeo;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use crate::graph::{Edge, Fow, Frc, Node, RoadNetwork};
-use crate::spatial::{EdgeEnvelope, SpatialIndex, SpatialIndexMode};
+use crate::spatial::{EdgeEnvelope, SpatialIndex};
 
 /// Returns the expected Arrow schema for road network parquet files.
 ///
@@ -54,18 +54,6 @@ pub fn road_network_schema() -> Schema {
 /// - distance (INTEGER): edge length in meters
 /// - geometry (GEOGRAPHY/WKB): edge geometry
 pub fn load_network_from_parquet(path: &Path) -> Result<(RoadNetwork, SpatialIndex)> {
-    load_network_from_parquet_with_mode(path, SpatialIndexMode::RTree)
-}
-
-/// Load a road network with a specific spatial index mode
-///
-/// Use `SpatialIndexMode::LinearScan` for faster startup when debugging
-/// with only a few OpenLR codes to decode. This skips R-tree construction
-/// but results in O(N) query time instead of O(log N).
-pub fn load_network_from_parquet_with_mode(
-    path: &Path,
-    spatial_mode: SpatialIndexMode,
-) -> Result<(RoadNetwork, SpatialIndex)> {
     let file = File::open(path).context("Failed to open parquet file")?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
     let reader = builder.build()?;
@@ -220,7 +208,7 @@ pub fn load_network_from_parquet_with_mode(
         }
     }
 
-    let spatial_index = SpatialIndex::with_mode(edge_envelopes, spatial_mode);
+    let spatial_index = SpatialIndex::new(edge_envelopes);
 
     Ok((network, spatial_index))
 }
