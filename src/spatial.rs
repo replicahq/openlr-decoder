@@ -3,6 +3,18 @@ use geo::{Coord, LineString, Point};
 use petgraph::graph::EdgeIndex;
 use rstar::{RTree, RTreeObject, AABB};
 
+/// Index mode selection for spatial queries
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SpatialIndexMode {
+    /// Use R-tree for fast queries (slower startup, faster queries)
+    /// This is the default mode for production use
+    #[default]
+    RTree,
+    /// Use linear scan for fast startup (faster startup, slower queries)
+    /// This is useful for debugging when only decoding a few locations
+    LinearScan,
+}
+
 /// Envelope wrapper for an edge's geometry in the R-tree
 #[derive(Debug, Clone)]
 pub struct EdgeEnvelope {
@@ -73,17 +85,43 @@ impl RTreeObject for EdgeEnvelope {
     }
 }
 
+/// Internal storage for spatial index
+enum SpatialIndexStorage {
+    /// R-tree index for O(log N) queries
+    RTree(RTree<EdgeEnvelope>),
+    /// Linear scan storage for O(N) queries but instant startup
+    LinearScan(Vec<EdgeEnvelope>),
+}
+
 /// Spatial index for fast edge lookup
 pub struct SpatialIndex {
-    rtree: RTree<EdgeEnvelope>,
+    storage: SpatialIndexStorage,
 }
 
 impl SpatialIndex {
-    /// Build a new spatial index from edge envelopes
+    /// Build a new spatial index from edge envelopes using R-tree (default)
     pub fn new(edges: Vec<EdgeEnvelope>) -> Self {
-        SpatialIndex {
-            rtree: RTree::bulk_load(edges),
-        }
+        Self::with_mode(edges, SpatialIndexMode::RTree)
+    }
+
+    /// Build a new spatial index with the specified mode
+    ///
+    /// - `RTree`: Builds an R-tree index for O(log N) queries. Slower startup but fast queries.
+    /// - `LinearScan`: Skips R-tree construction for instant startup. O(N) queries.
+    pub fn with_mode(edges: Vec<EdgeEnvelope>, mode: SpatialIndexMode) -> Self {
+        let storage = match mode {
+            SpatialIndexMode::RTree => SpatialIndexStorage::RTree(RTree::bulk_load(edges)),
+            SpatialIndexMode::LinearScan => SpatialIndexStorage::LinearScan(edges),
+        };
+        SpatialIndex { storage }
+    }
+
+    /// Create a spatial index with linear scan mode (fast startup, slow queries)
+    ///
+    /// This is useful for debugging scenarios where you only need to decode
+    /// a small number of locations and want to minimize startup time.
+    pub fn new_linear_scan(edges: Vec<EdgeEnvelope>) -> Self {
+        Self::with_mode(edges, SpatialIndexMode::LinearScan)
     }
 
     /// Find all edges within a bounding box (degrees)
@@ -102,9 +140,23 @@ impl SpatialIndex {
         let max_corner = [center.x() + delta_lon, center.y() + delta_lat];
         let search_box = AABB::from_corners(min_corner, max_corner);
 
-        self.rtree
-            .locate_in_envelope_intersecting(&search_box)
-            .collect()
+        match &self.storage {
+            SpatialIndexStorage::RTree(rtree) => {
+                rtree.locate_in_envelope_intersecting(&search_box).collect()
+            }
+            SpatialIndexStorage::LinearScan(edges) => {
+                // Linear scan: check each edge's bounding box
+                edges
+                    .iter()
+                    .filter(|e| {
+                        e.min_x <= max_corner[0]
+                            && e.max_x >= min_corner[0]
+                            && e.min_y <= max_corner[1]
+                            && e.max_y >= min_corner[1]
+                    })
+                    .collect()
+            }
+        }
     }
 
     /// Find edges within radius, sorted by distance to query point
@@ -129,11 +181,22 @@ impl SpatialIndex {
     }
 
     pub fn len(&self) -> usize {
-        self.rtree.size()
+        match &self.storage {
+            SpatialIndexStorage::RTree(rtree) => rtree.size(),
+            SpatialIndexStorage::LinearScan(edges) => edges.len(),
+        }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.rtree.size() == 0
+        self.len() == 0
+    }
+
+    /// Returns the index mode being used
+    pub fn mode(&self) -> SpatialIndexMode {
+        match &self.storage {
+            SpatialIndexStorage::RTree(_) => SpatialIndexMode::RTree,
+            SpatialIndexStorage::LinearScan(_) => SpatialIndexMode::LinearScan,
+        }
     }
 }
 
@@ -269,5 +332,92 @@ mod tests {
 
         assert_eq!(env.min_x, 0.0);
         assert_eq!(env.max_x, 1.0);
+    }
+
+    fn create_test_edges() -> Vec<EdgeEnvelope> {
+        vec![
+            EdgeEnvelope::new(
+                EdgeIndex::new(0),
+                LineString::from(vec![(0.0, 0.0), (0.001, 0.0)]),
+            ),
+            EdgeEnvelope::new(
+                EdgeIndex::new(1),
+                LineString::from(vec![(0.001, 0.0), (0.002, 0.0)]),
+            ),
+            EdgeEnvelope::new(
+                EdgeIndex::new(2),
+                LineString::from(vec![(1.0, 1.0), (1.001, 1.0)]),
+            ),
+        ]
+    }
+
+    #[test]
+    fn test_spatial_index_mode_rtree() {
+        let edges = create_test_edges();
+        let index = SpatialIndex::with_mode(edges, SpatialIndexMode::RTree);
+
+        assert_eq!(index.mode(), SpatialIndexMode::RTree);
+        assert_eq!(index.len(), 3);
+        assert!(!index.is_empty());
+    }
+
+    #[test]
+    fn test_spatial_index_mode_linear_scan() {
+        let edges = create_test_edges();
+        let index = SpatialIndex::with_mode(edges, SpatialIndexMode::LinearScan);
+
+        assert_eq!(index.mode(), SpatialIndexMode::LinearScan);
+        assert_eq!(index.len(), 3);
+        assert!(!index.is_empty());
+    }
+
+    #[test]
+    fn test_spatial_index_modes_find_same_results() {
+        let edges = create_test_edges();
+        let rtree_index = SpatialIndex::with_mode(edges.clone(), SpatialIndexMode::RTree);
+        let linear_index = SpatialIndex::with_mode(edges, SpatialIndexMode::LinearScan);
+
+        // Query near the first two edges
+        let center = Point::new(0.001, 0.0);
+        let radius_m = 500.0; // ~500m should capture nearby edges
+
+        let rtree_results = rtree_index.find_within_radius(center, radius_m);
+        let linear_results = linear_index.find_within_radius(center, radius_m);
+
+        // Both should find the same edges
+        assert_eq!(
+            rtree_results.len(),
+            linear_results.len(),
+            "R-tree found {} edges, linear scan found {}",
+            rtree_results.len(),
+            linear_results.len()
+        );
+
+        // Extract edge indices and sort for comparison
+        let mut rtree_edges: Vec<_> = rtree_results.iter().map(|(e, _)| e.edge_idx).collect();
+        let mut linear_edges: Vec<_> = linear_results.iter().map(|(e, _)| e.edge_idx).collect();
+        rtree_edges.sort();
+        linear_edges.sort();
+
+        assert_eq!(
+            rtree_edges, linear_edges,
+            "Both modes should find the same edges"
+        );
+    }
+
+    #[test]
+    fn test_new_linear_scan_convenience() {
+        let edges = create_test_edges();
+        let index = SpatialIndex::new_linear_scan(edges);
+
+        assert_eq!(index.mode(), SpatialIndexMode::LinearScan);
+    }
+
+    #[test]
+    fn test_default_mode_is_rtree() {
+        let edges = create_test_edges();
+        let index = SpatialIndex::new(edges);
+
+        assert_eq!(index.mode(), SpatialIndexMode::RTree);
     }
 }
