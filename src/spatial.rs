@@ -141,9 +141,9 @@ impl SpatialIndex {
         let search_box = AABB::from_corners(min_corner, max_corner);
 
         match &self.storage {
-            SpatialIndexStorage::RTree(rtree) => rtree
-                .locate_in_envelope_intersecting(&search_box)
-                .collect(),
+            SpatialIndexStorage::RTree(rtree) => {
+                rtree.locate_in_envelope_intersecting(&search_box).collect()
+            }
             SpatialIndexStorage::LinearScan(edges) => {
                 // Linear scan: check each edge's bounding box
                 edges
@@ -399,7 +399,10 @@ mod tests {
         rtree_edges.sort();
         linear_edges.sort();
 
-        assert_eq!(rtree_edges, linear_edges, "Both modes should find the same edges");
+        assert_eq!(
+            rtree_edges, linear_edges,
+            "Both modes should find the same edges"
+        );
     }
 
     #[test]
