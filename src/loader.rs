@@ -6,6 +6,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use arrow::array::{Array, BinaryArray, Float64Array, Int64Array, StringArray, UInt64Array};
+use arrow::datatypes::{DataType, Field, Schema};
 use geo::{LineString, Point};
 use geozero::wkb;
 use geozero::ToGeo;
@@ -13,6 +14,33 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use crate::graph::{Edge, Fow, Frc, Node, RoadNetwork};
 use crate::spatial::{EdgeEnvelope, SpatialIndex, SpatialIndexMode};
+
+/// Returns the expected Arrow schema for road network parquet files.
+///
+/// Required columns:
+/// - `stableEdgeId` (UInt64): unique edge identifier
+/// - `startVertex` (Int64): start node ID
+/// - `endVertex` (Int64): end node ID
+/// - `startLat`, `startLon`, `endLat`, `endLon` (Float64): endpoint coordinates
+/// - `highway` (Utf8): OSM highway tag
+///
+/// Optional columns:
+/// - `lanes` (Int64): number of lanes, used for Form of Way inference
+/// - `geometry` (Binary): WKB-encoded LineString geometry
+pub fn road_network_schema() -> Schema {
+    Schema::new(vec![
+        Field::new("stableEdgeId", DataType::UInt64, false),
+        Field::new("startVertex", DataType::Int64, false),
+        Field::new("endVertex", DataType::Int64, false),
+        Field::new("startLat", DataType::Float64, false),
+        Field::new("startLon", DataType::Float64, false),
+        Field::new("endLat", DataType::Float64, false),
+        Field::new("endLon", DataType::Float64, false),
+        Field::new("highway", DataType::Utf8, false),
+        Field::new("lanes", DataType::Int64, true),
+        Field::new("geometry", DataType::Binary, true),
+    ])
+}
 
 /// Load a road network from a parquet file with the BigQuery export schema
 ///

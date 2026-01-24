@@ -337,6 +337,15 @@ impl PyDecoder {
     }
 }
 
+/// Get the expected PyArrow schema for road network parquet files
+#[pyfunction]
+fn road_network_schema(py: Python<'_>) -> PyResult<Py<PyAny>> {
+    crate::loader::road_network_schema()
+        .to_pyarrow(py)
+        .map(|bound| bound.unbind())
+        .map_err(|e| PyValueError::new_err(format!("Failed to convert schema: {}", e)))
+}
+
 /// Convert decode error to a user-friendly message
 fn decode_error_message(err: DecodeError) -> String {
     match err {
@@ -369,5 +378,6 @@ fn _openlr_decoder(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDecoder>()?;
     m.add_class::<PyDecoderConfig>()?;
     m.add_class::<PyDecodedPath>()?;
+    m.add_function(wrap_pyfunction!(road_network_schema, m)?)?;
     Ok(())
 }

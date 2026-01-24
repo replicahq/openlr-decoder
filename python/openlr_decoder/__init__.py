@@ -24,6 +24,7 @@ from openlr_decoder._openlr_decoder import (
     Decoder,
     DecoderConfig,
     DecodedPath,
+    road_network_schema,
 )
 
 __all__ = [
@@ -31,6 +32,7 @@ __all__ = [
     "Decoder",
     "DecoderConfig",
     "DecodedPath",
+    "road_network_schema",
 ]
 
 __version__ = "0.1.1"
