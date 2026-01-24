@@ -121,6 +121,7 @@ impl Fow {
     }
 
     /// Check FOW compatibility (OpenLR allows some flexibility)
+    /// For cross-provider decoding, FOW is treated as a hint rather than strict filter
     pub fn is_compatible(&self, other: Fow) -> bool {
         // Undefined matches anything
         if *self == Fow::Undefined || other == Fow::Undefined {
@@ -130,12 +131,16 @@ impl Fow {
         if *self == other {
             return true;
         }
-        // Single/Multiple carriageway are somewhat interchangeable
-        matches!(
-            (self, other),
-            (Fow::SingleCarriageway, Fow::MultipleCarriageway)
-                | (Fow::MultipleCarriageway, Fow::SingleCarriageway)
-        )
+        // For cross-provider decoding, allow flexibility between similar FOW types:
+        // - Single/Multiple/TrafficSquare/Other are common road types
+        // - Only Motorway, Roundabout, and SlipRoad should be strictly matched
+        let is_generic_road = |f: &Fow| {
+            matches!(
+                f,
+                Fow::SingleCarriageway | Fow::MultipleCarriageway | Fow::TrafficSquare | Fow::Other
+            )
+        };
+        is_generic_road(self) && is_generic_road(&other)
     }
 }
 
