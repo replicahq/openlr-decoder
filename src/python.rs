@@ -14,8 +14,8 @@ use rayon::prelude::*;
 use crate::candidates::CandidateConfig;
 use crate::decoder::{DecodeError, DecodedPath, Decoder, DecoderConfig};
 use crate::graph::RoadNetwork;
-use crate::loader::load_network_from_parquet;
-use crate::spatial::SpatialIndex;
+use crate::loader::load_network_from_parquet_with_mode;
+use crate::spatial::{SpatialIndex, SpatialIndexMode};
 
 /// Python-exposed road network loaded from parquet
 #[pyclass(name = "RoadNetwork")]
@@ -30,13 +30,22 @@ impl PyRoadNetwork {
     ///
     /// Args:
     ///     path: Path to the parquet file containing the road network
+    ///     debug_mode: If True, skip R-tree construction for faster startup.
+    ///                 Useful when debugging with only a few OpenLR codes.
+    ///                 Queries will be O(N) instead of O(log N). Default: False
     ///
     /// Returns:
     ///     RoadNetwork: The loaded road network ready for decoding
     #[staticmethod]
-    #[pyo3(signature = (path))]
-    fn from_parquet(path: &str) -> PyResult<Self> {
-        let (network, spatial) = load_network_from_parquet(Path::new(path))
+    #[pyo3(signature = (path, debug_mode=false))]
+    fn from_parquet(path: &str, debug_mode: bool) -> PyResult<Self> {
+        let spatial_mode = if debug_mode {
+            SpatialIndexMode::LinearScan
+        } else {
+            SpatialIndexMode::RTree
+        };
+
+        let (network, spatial) = load_network_from_parquet_with_mode(Path::new(path), spatial_mode)
             .map_err(|e| PyValueError::new_err(format!("Failed to load network: {}", e)))?;
 
         Ok(PyRoadNetwork {
@@ -55,6 +64,12 @@ impl PyRoadNetwork {
     #[getter]
     fn node_count(&self) -> usize {
         self.network.graph.node_count()
+    }
+
+    /// Check if the network was loaded in debug mode (linear scan)
+    #[getter]
+    fn debug_mode(&self) -> bool {
+        matches!(self.spatial.mode(), SpatialIndexMode::LinearScan)
     }
 }
 
