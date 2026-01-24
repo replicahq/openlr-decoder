@@ -78,26 +78,61 @@ fn build_parallel_roads_network() -> (RoadNetwork, SpatialIndex) {
 
     // Add edges (forward and reverse for each connection)
     // Line 1: N1 <-> N2 (500m)
-    let edge_1 =
-        Edge::new_with_length(1, geom_1_2.clone(), Frc::Frc5, Fow::MultipleCarriageway, LINE_1_LENGTH);
-    let edge_neg1 =
-        Edge::new_with_length(101, geom_2_1.clone(), Frc::Frc5, Fow::MultipleCarriageway, LINE_1_LENGTH);
+    let edge_1 = Edge::new_with_length(
+        1,
+        geom_1_2.clone(),
+        Frc::Frc5,
+        Fow::MultipleCarriageway,
+        LINE_1_LENGTH,
+    );
+    let edge_neg1 = Edge::new_with_length(
+        101,
+        geom_2_1.clone(),
+        Frc::Frc5,
+        Fow::MultipleCarriageway,
+        LINE_1_LENGTH,
+    );
 
     // Line 2: N2 -> N3 (750m, shorter parallel)
-    let edge_2 =
-        Edge::new_with_length(2, geom_2_short.clone(), Frc::Frc5, Fow::MultipleCarriageway, LINE_2_LENGTH);
-    let edge_neg2 =
-        Edge::new_with_length(102, geom_3_2.clone(), Frc::Frc5, Fow::MultipleCarriageway, LINE_2_LENGTH);
+    let edge_2 = Edge::new_with_length(
+        2,
+        geom_2_short.clone(),
+        Frc::Frc5,
+        Fow::MultipleCarriageway,
+        LINE_2_LENGTH,
+    );
+    let edge_neg2 = Edge::new_with_length(
+        102,
+        geom_3_2.clone(),
+        Frc::Frc5,
+        Fow::MultipleCarriageway,
+        LINE_2_LENGTH,
+    );
 
     // Line 3: N3 <-> N4 (550m)
-    let edge_3 =
-        Edge::new_with_length(3, geom_3_4.clone(), Frc::Frc5, Fow::MultipleCarriageway, LINE_3_LENGTH);
-    let edge_neg3 =
-        Edge::new_with_length(103, geom_4_3.clone(), Frc::Frc5, Fow::MultipleCarriageway, LINE_3_LENGTH);
+    let edge_3 = Edge::new_with_length(
+        3,
+        geom_3_4.clone(),
+        Frc::Frc5,
+        Fow::MultipleCarriageway,
+        LINE_3_LENGTH,
+    );
+    let edge_neg3 = Edge::new_with_length(
+        103,
+        geom_4_3.clone(),
+        Frc::Frc5,
+        Fow::MultipleCarriageway,
+        LINE_3_LENGTH,
+    );
 
     // Line 4: N2 <-> N3 (800m, longer parallel)
-    let edge_4 =
-        Edge::new_with_length(4, geom_4_long.clone(), Frc::Frc5, Fow::MultipleCarriageway, LINE_4_LENGTH);
+    let edge_4 = Edge::new_with_length(
+        4,
+        geom_4_long.clone(),
+        Frc::Frc5,
+        Fow::MultipleCarriageway,
+        LINE_4_LENGTH,
+    );
     let edge_neg4 = Edge::new_with_length(
         104,
         geom_4_long_rev.clone(),
@@ -220,8 +255,8 @@ impl<'a> TestDecoder<'a> {
         let min_distance = (expected_distance * (1.0 - tolerance))
             .min(expected_distance - abs_tolerance)
             .max(10.0);
-        let max_distance = (expected_distance * (1.0 + tolerance))
-            .max(expected_distance + abs_tolerance);
+        let max_distance =
+            (expected_distance * (1.0 + tolerance)).max(expected_distance + abs_tolerance);
 
         let mut best_path: Option<Vec<u64>> = None;
         let mut best_score = f64::MAX;
@@ -231,9 +266,12 @@ impl<'a> TestDecoder<'a> {
             for end_cand in end_candidates.iter().take(10) {
                 // Try to find a path from start to end candidate
                 // Pass expected_distance as target to prefer paths matching the DNP
-                if let Some((path, path_length)) =
-                    self.find_path_with_target(start_cand, end_cand, expected_distance * 2.0, Some(expected_distance))
-                {
+                if let Some((path, path_length)) = self.find_path_with_target(
+                    start_cand,
+                    end_cand,
+                    expected_distance * 2.0,
+                    Some(expected_distance),
+                ) {
                     // Check if path length is within tolerance
                     if path_length >= min_distance && path_length <= max_distance {
                         let length_diff =
