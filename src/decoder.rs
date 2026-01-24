@@ -667,65 +667,13 @@ impl<'a> Decoder<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::{Edge, Fow, Frc, Node, RoadNetwork};
-    use crate::spatial::{EdgeEnvelope, SpatialIndex};
-    use geo::LineString;
+    use crate::graph::{Fow, Frc};
+    use crate::test_utils::TestNetworkBuilder;
 
     #[test]
     fn test_decoder_config_defaults() {
         let config = DecoderConfig::default();
         assert_eq!(config.length_tolerance, 0.35);
-    }
-
-    /// Helper to build a simple linear network for testing bounded_astar
-    /// Creates nodes and edges with specified lengths
-    fn build_linear_network(edge_lengths: &[(u64, i64, i64, f64)]) -> (RoadNetwork, SpatialIndex) {
-        let mut network = RoadNetwork::new();
-        let mut envelopes = Vec::new();
-
-        // Collect unique node IDs and create nodes
-        let mut node_ids: std::collections::HashSet<i64> = std::collections::HashSet::new();
-        for &(_, start, end, _) in edge_lengths {
-            node_ids.insert(start);
-            node_ids.insert(end);
-        }
-
-        // Create nodes at arbitrary but distinct coordinates
-        // Space them out along a line for realistic geometry
-        let mut sorted_nodes: Vec<i64> = node_ids.into_iter().collect();
-        sorted_nodes.sort();
-
-        for (i, &node_id) in sorted_nodes.iter().enumerate() {
-            let lon = 6.12 + (i as f64) * 0.001; // Spread along longitude
-            let lat = 49.60;
-            network.add_node(Node {
-                id: node_id,
-                coord: Point::new(lon, lat),
-            });
-        }
-
-        // Add edges
-        for &(edge_id, start_node, end_node, length_m) in edge_lengths {
-            let start_idx = *network.node_id_to_index.get(&start_node).unwrap();
-            let end_idx = *network.node_id_to_index.get(&end_node).unwrap();
-
-            let start_coord = network.graph[start_idx].coord;
-            let end_coord = network.graph[end_idx].coord;
-
-            let geometry = LineString::from(vec![
-                (start_coord.x(), start_coord.y()),
-                (end_coord.x(), end_coord.y()),
-            ]);
-
-            let mut edge = Edge::new(edge_id, geometry.clone(), Frc::Frc3, Fow::SingleCarriageway);
-            edge.length_m = length_m; // Override with test-specified length
-
-            let edge_idx = network.add_edge(start_node, end_node, edge);
-            envelopes.push(EdgeEnvelope::new(edge_idx, geometry));
-        }
-
-        let spatial = SpatialIndex::new(envelopes);
-        (network, spatial)
     }
 
     // =========================================================================
@@ -745,11 +693,13 @@ mod tests {
     fn test_bounded_astar_finds_valid_path() {
         // Build a simple 3-node linear network: 1 -> 2 -> 3
         // Edge 1-2: 100m, Edge 2-3: 150m, Total: 250m
-        let edges = vec![
-            (1, 1, 2, 100.0), // edge_id, start, end, length
-            (2, 2, 3, 150.0),
-        ];
-        let (network, _) = build_linear_network(&edges);
+        let (network, _) = TestNetworkBuilder::new()
+            .add_node(1, 49.60, 6.120)
+            .add_node(2, 49.60, 6.121)
+            .add_node(3, 49.60, 6.122)
+            .add_edge(1, 1, 2, 100.0, Frc::Frc3, Fow::SingleCarriageway)
+            .add_edge(2, 2, 3, 150.0, Frc::Frc3, Fow::SingleCarriageway)
+            .build();
 
         let start = *network.node_id_to_index.get(&1).unwrap();
         let goal = *network.node_id_to_index.get(&3).unwrap();
@@ -761,7 +711,11 @@ mod tests {
         assert!(result.is_some(), "Should find a valid path within max_cost");
 
         let (cost, path) = result.unwrap();
-        assert_eq!(path.len(), 3, "Path should have 3 nodes: start, middle, goal");
+        assert_eq!(
+            path.len(),
+            3,
+            "Path should have 3 nodes: start, middle, goal"
+        );
         assert_eq!(path[0], start);
         assert_eq!(path[2], goal);
         assert!(
@@ -776,8 +730,13 @@ mod tests {
     #[test]
     fn test_bounded_astar_no_route_when_max_cost_exceeded() {
         // Same network as above: total path = 250m
-        let edges = vec![(1, 1, 2, 100.0), (2, 2, 3, 150.0)];
-        let (network, _) = build_linear_network(&edges);
+        let (network, _) = TestNetworkBuilder::new()
+            .add_node(1, 49.60, 6.120)
+            .add_node(2, 49.60, 6.121)
+            .add_node(3, 49.60, 6.122)
+            .add_edge(1, 1, 2, 100.0, Frc::Frc3, Fow::SingleCarriageway)
+            .add_edge(2, 2, 3, 150.0, Frc::Frc3, Fow::SingleCarriageway)
+            .build();
 
         let start = *network.node_id_to_index.get(&1).unwrap();
         let goal = *network.node_id_to_index.get(&3).unwrap();
@@ -797,12 +756,15 @@ mod tests {
     #[test]
     fn test_bounded_astar_returns_correct_cost() {
         // Build a longer network: 1 -> 2 -> 3 -> 4
-        let edges = vec![
-            (1, 1, 2, 172.0), // Matches Java edge 4 length
-            (2, 2, 3, 90.0),  // Matches Java edge 6 length
-            (3, 3, 4, 50.0),  // Matches Java edge 8 length
-        ];
-        let (network, _) = build_linear_network(&edges);
+        let (network, _) = TestNetworkBuilder::new()
+            .add_node(1, 49.60, 6.120)
+            .add_node(2, 49.60, 6.121)
+            .add_node(3, 49.60, 6.122)
+            .add_node(4, 49.60, 6.123)
+            .add_edge(1, 1, 2, 172.0, Frc::Frc3, Fow::SingleCarriageway) // Matches Java edge 4 length
+            .add_edge(2, 2, 3, 90.0, Frc::Frc3, Fow::SingleCarriageway) // Matches Java edge 6 length
+            .add_edge(3, 3, 4, 50.0, Frc::Frc3, Fow::SingleCarriageway) // Matches Java edge 8 length
+            .build();
 
         let start = *network.node_id_to_index.get(&1).unwrap();
         let goal = *network.node_id_to_index.get(&4).unwrap();
@@ -837,49 +799,18 @@ mod tests {
         // Path via 2: 100 + 100 = 200m
         // Path via 3: 150 + 150 = 300m
         // A* should choose the shorter path via node 2
-        let mut network = RoadNetwork::new();
-        let mut envelopes = Vec::new();
-
-        // Add nodes
-        network.add_node(Node {
-            id: 1,
-            coord: Point::new(0.0, 0.0),
-        });
-        network.add_node(Node {
-            id: 2,
-            coord: Point::new(0.001, 0.001),
-        });
-        network.add_node(Node {
-            id: 3,
-            coord: Point::new(0.001, -0.001),
-        });
-        network.add_node(Node {
-            id: 4,
-            coord: Point::new(0.002, 0.0),
-        });
-
-        // Add edges for path via node 2 (shorter: 100 + 100 = 200m)
-        let add_edge =
-            |network: &mut RoadNetwork, envelopes: &mut Vec<EdgeEnvelope>, id, from, to, len| {
-                let start_idx = *network.node_id_to_index.get(&from).unwrap();
-                let end_idx = *network.node_id_to_index.get(&to).unwrap();
-                let start_coord = network.graph[start_idx].coord;
-                let end_coord = network.graph[end_idx].coord;
-                let geom = LineString::from(vec![
-                    (start_coord.x(), start_coord.y()),
-                    (end_coord.x(), end_coord.y()),
-                ]);
-                let mut edge = Edge::new(id, geom.clone(), Frc::Frc3, Fow::SingleCarriageway);
-                edge.length_m = len;
-                let edge_idx = network.add_edge(from, to, edge);
-                envelopes.push(EdgeEnvelope::new(edge_idx, geom));
-            };
-
-        add_edge(&mut network, &mut envelopes, 1, 1, 2, 100.0);
-        add_edge(&mut network, &mut envelopes, 2, 2, 4, 100.0);
-        // Path via node 3 (longer: 150 + 150 = 300m)
-        add_edge(&mut network, &mut envelopes, 3, 1, 3, 150.0);
-        add_edge(&mut network, &mut envelopes, 4, 3, 4, 150.0);
+        let (network, _) = TestNetworkBuilder::new()
+            .add_node(1, 0.0, 0.0)
+            .add_node(2, 0.001, 0.001)
+            .add_node(3, -0.001, 0.001)
+            .add_node(4, 0.0, 0.002)
+            // Path via node 2 (shorter: 100 + 100 = 200m)
+            .add_edge(1, 1, 2, 100.0, Frc::Frc3, Fow::SingleCarriageway)
+            .add_edge(2, 2, 4, 100.0, Frc::Frc3, Fow::SingleCarriageway)
+            // Path via node 3 (longer: 150 + 150 = 300m)
+            .add_edge(3, 1, 3, 150.0, Frc::Frc3, Fow::SingleCarriageway)
+            .add_edge(4, 3, 4, 150.0, Frc::Frc3, Fow::SingleCarriageway)
+            .build();
 
         let start = *network.node_id_to_index.get(&1).unwrap();
         let goal = *network.node_id_to_index.get(&4).unwrap();
@@ -909,8 +840,11 @@ mod tests {
     /// Test that bounded_astar handles same start and goal node
     #[test]
     fn test_bounded_astar_same_start_and_goal() {
-        let edges = vec![(1, 1, 2, 100.0)];
-        let (network, _) = build_linear_network(&edges);
+        let (network, _) = TestNetworkBuilder::new()
+            .add_node(1, 49.60, 6.120)
+            .add_node(2, 49.60, 6.121)
+            .add_edge(1, 1, 2, 100.0, Frc::Frc3, Fow::SingleCarriageway)
+            .build();
 
         let start = *network.node_id_to_index.get(&1).unwrap();
         let goal = start; // Same node
@@ -929,11 +863,14 @@ mod tests {
     #[test]
     fn test_bounded_astar_disconnected_nodes() {
         // Create two separate components: 1->2 and 3->4 (not connected)
-        let edges = vec![
-            (1, 1, 2, 100.0),
-            (2, 3, 4, 100.0), // Disconnected from 1-2
-        ];
-        let (network, _) = build_linear_network(&edges);
+        let (network, _) = TestNetworkBuilder::new()
+            .add_node(1, 49.60, 6.120)
+            .add_node(2, 49.60, 6.121)
+            .add_node(3, 49.60, 6.130) // Separate component
+            .add_node(4, 49.60, 6.131)
+            .add_edge(1, 1, 2, 100.0, Frc::Frc3, Fow::SingleCarriageway)
+            .add_edge(2, 3, 4, 100.0, Frc::Frc3, Fow::SingleCarriageway) // Disconnected from 1-2
+            .build();
 
         let start = *network.node_id_to_index.get(&1).unwrap();
         let goal = *network.node_id_to_index.get(&4).unwrap(); // In different component
