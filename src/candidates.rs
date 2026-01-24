@@ -311,7 +311,7 @@ mod tests {
         let score_max = make_candidate(f64::MAX); // Worst - like Java's MIN_VALUE ratio
 
         // Create unsorted list (similar to Java test setup)
-        let mut candidates = vec![
+        let mut candidates = [
             score_01.clone(),
             score_max.clone(),
             score_0.clone(),
@@ -343,7 +343,7 @@ mod tests {
         let score_large = make_candidate(1e10);
         let score_infinity = make_candidate(f64::INFINITY);
 
-        let mut candidates = vec![
+        let mut candidates = [
             score_infinity.clone(),
             score_zero.clone(),
             score_large.clone(),
@@ -372,7 +372,7 @@ mod tests {
         let poor = make_candidate(compute_score(50.0, 20.0, 2, &config));
         let worst = make_candidate(compute_score(100.0, 30.0, 2, &config));
 
-        let mut candidates = vec![
+        let mut candidates = [
             medium.clone(),
             worst.clone(),
             perfect.clone(),
