@@ -667,10 +667,220 @@ impl<'a> Decoder<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::{Fow, Frc};
+    use crate::test_utils::TestNetworkBuilder;
 
     #[test]
     fn test_decoder_config_defaults() {
         let config = DecoderConfig::default();
         assert_eq!(config.length_tolerance, 0.35);
+    }
+
+    // =========================================================================
+    // Route Search Tests (ported from Java OpenLR RouteSearchTest)
+    // =========================================================================
+    //
+    // These tests verify the bounded A* search algorithm behavior, inspired by
+    // the Java OpenLR decoder's RouteSearchTest. The key scenarios tested are:
+    //
+    // 1. testValidRoute - A* finds a valid path within max_cost constraints
+    // 2. testNoRouteFound - A* returns None when max_cost is too short
+    // 3. Path cost verification - The returned cost matches actual path length
+
+    /// Test that bounded_astar finds a valid path when one exists within max_cost
+    /// Equivalent to Java testValidRoute - verifies route is found with sufficient max_distance
+    #[test]
+    fn test_bounded_astar_finds_valid_path() {
+        // Build a simple 3-node linear network: 1 -> 2 -> 3
+        // Edge 1-2: 100m, Edge 2-3: 150m, Total: 250m
+        let (network, _) = TestNetworkBuilder::new()
+            .add_node(1, 49.60, 6.120)
+            .add_node(2, 49.60, 6.121)
+            .add_node(3, 49.60, 6.122)
+            .add_edge(1, 1, 2, 100.0, Frc::Frc3, Fow::SingleCarriageway)
+            .add_edge(2, 2, 3, 150.0, Frc::Frc3, Fow::SingleCarriageway)
+            .build();
+
+        let start = *network.node_id_to_index.get(&1).unwrap();
+        let goal = *network.node_id_to_index.get(&3).unwrap();
+        let goal_coord = network.node(goal).unwrap().coord;
+
+        // Max cost of 500m should easily accommodate the 250m path
+        let result = bounded_astar(&network, start, goal, goal_coord, 500.0);
+
+        assert!(result.is_some(), "Should find a valid path within max_cost");
+
+        let (cost, path) = result.unwrap();
+        assert_eq!(
+            path.len(),
+            3,
+            "Path should have 3 nodes: start, middle, goal"
+        );
+        assert_eq!(path[0], start);
+        assert_eq!(path[2], goal);
+        assert!(
+            (cost - 250.0).abs() < 1.0,
+            "Path cost should be ~250m, got {}",
+            cost
+        );
+    }
+
+    /// Test that bounded_astar returns None when max_cost is too short
+    /// Equivalent to Java testNoRouteFound - route search fails with max_distance=100m
+    #[test]
+    fn test_bounded_astar_no_route_when_max_cost_exceeded() {
+        // Same network as above: total path = 250m
+        let (network, _) = TestNetworkBuilder::new()
+            .add_node(1, 49.60, 6.120)
+            .add_node(2, 49.60, 6.121)
+            .add_node(3, 49.60, 6.122)
+            .add_edge(1, 1, 2, 100.0, Frc::Frc3, Fow::SingleCarriageway)
+            .add_edge(2, 2, 3, 150.0, Frc::Frc3, Fow::SingleCarriageway)
+            .build();
+
+        let start = *network.node_id_to_index.get(&1).unwrap();
+        let goal = *network.node_id_to_index.get(&3).unwrap();
+        let goal_coord = network.node(goal).unwrap().coord;
+
+        // Max cost of 100m is less than the 250m path - should fail
+        // (This mirrors Java's NO_ROUTE_FOUND_MAX_DISTANCE = 100)
+        let result = bounded_astar(&network, start, goal, goal_coord, 100.0);
+
+        assert!(
+            result.is_none(),
+            "Should return None when path exceeds max_cost"
+        );
+    }
+
+    /// Test that bounded_astar returns the correct path cost
+    #[test]
+    fn test_bounded_astar_returns_correct_cost() {
+        // Build a longer network: 1 -> 2 -> 3 -> 4
+        let (network, _) = TestNetworkBuilder::new()
+            .add_node(1, 49.60, 6.120)
+            .add_node(2, 49.60, 6.121)
+            .add_node(3, 49.60, 6.122)
+            .add_node(4, 49.60, 6.123)
+            .add_edge(1, 1, 2, 172.0, Frc::Frc3, Fow::SingleCarriageway) // Matches Java edge 4 length
+            .add_edge(2, 2, 3, 90.0, Frc::Frc3, Fow::SingleCarriageway) // Matches Java edge 6 length
+            .add_edge(3, 3, 4, 50.0, Frc::Frc3, Fow::SingleCarriageway) // Matches Java edge 8 length
+            .build();
+
+        let start = *network.node_id_to_index.get(&1).unwrap();
+        let goal = *network.node_id_to_index.get(&4).unwrap();
+        let goal_coord = network.node(goal).unwrap().coord;
+
+        let result = bounded_astar(&network, start, goal, goal_coord, 1000.0);
+        assert!(result.is_some());
+
+        let (cost, path) = result.unwrap();
+
+        // Expected total: 172 + 90 + 50 = 312m
+        assert!(
+            (cost - 312.0).abs() < 1.0,
+            "Path cost should be 312m, got {}",
+            cost
+        );
+        assert_eq!(path.len(), 4, "Path should traverse all 4 nodes");
+    }
+
+    /// Test bounded_astar with branching paths (chooses shortest)
+    /// This simulates the topology from Java tests where different FRC constraints
+    /// lead to different paths. Here we just verify A* finds the shortest path.
+    #[test]
+    fn test_bounded_astar_chooses_shortest_path() {
+        // Build a diamond-shaped network:
+        //     2
+        //    / \
+        //   1   4
+        //    \ /
+        //     3
+        //
+        // Path via 2: 100 + 100 = 200m
+        // Path via 3: 150 + 150 = 300m
+        // A* should choose the shorter path via node 2
+        let (network, _) = TestNetworkBuilder::new()
+            .add_node(1, 0.0, 0.0)
+            .add_node(2, 0.001, 0.001)
+            .add_node(3, -0.001, 0.001)
+            .add_node(4, 0.0, 0.002)
+            // Path via node 2 (shorter: 100 + 100 = 200m)
+            .add_edge(1, 1, 2, 100.0, Frc::Frc3, Fow::SingleCarriageway)
+            .add_edge(2, 2, 4, 100.0, Frc::Frc3, Fow::SingleCarriageway)
+            // Path via node 3 (longer: 150 + 150 = 300m)
+            .add_edge(3, 1, 3, 150.0, Frc::Frc3, Fow::SingleCarriageway)
+            .add_edge(4, 3, 4, 150.0, Frc::Frc3, Fow::SingleCarriageway)
+            .build();
+
+        let start = *network.node_id_to_index.get(&1).unwrap();
+        let goal = *network.node_id_to_index.get(&4).unwrap();
+        let goal_coord = network.node(goal).unwrap().coord;
+
+        let result = bounded_astar(&network, start, goal, goal_coord, 500.0);
+        assert!(result.is_some());
+
+        let (cost, path) = result.unwrap();
+
+        // A* should find the shorter 200m path via node 2
+        assert!(
+            (cost - 200.0).abs() < 1.0,
+            "Should find shortest path (200m), got {}m",
+            cost
+        );
+        assert_eq!(path.len(), 3, "Shortest path has 3 nodes");
+
+        // Verify it went through node 2, not node 3
+        let node2_idx = *network.node_id_to_index.get(&2).unwrap();
+        assert!(
+            path.contains(&node2_idx),
+            "Path should go through node 2 (shorter route)"
+        );
+    }
+
+    /// Test that bounded_astar handles same start and goal node
+    #[test]
+    fn test_bounded_astar_same_start_and_goal() {
+        let (network, _) = TestNetworkBuilder::new()
+            .add_node(1, 49.60, 6.120)
+            .add_node(2, 49.60, 6.121)
+            .add_edge(1, 1, 2, 100.0, Frc::Frc3, Fow::SingleCarriageway)
+            .build();
+
+        let start = *network.node_id_to_index.get(&1).unwrap();
+        let goal = start; // Same node
+        let goal_coord = network.node(goal).unwrap().coord;
+
+        let result = bounded_astar(&network, start, goal, goal_coord, 100.0);
+        assert!(result.is_some());
+
+        let (cost, path) = result.unwrap();
+        assert_eq!(cost, 0.0, "Cost to same node should be 0");
+        assert_eq!(path.len(), 1, "Path to same node should have 1 element");
+        assert_eq!(path[0], start);
+    }
+
+    /// Test bounded_astar with disconnected nodes
+    #[test]
+    fn test_bounded_astar_disconnected_nodes() {
+        // Create two separate components: 1->2 and 3->4 (not connected)
+        let (network, _) = TestNetworkBuilder::new()
+            .add_node(1, 49.60, 6.120)
+            .add_node(2, 49.60, 6.121)
+            .add_node(3, 49.60, 6.130) // Separate component
+            .add_node(4, 49.60, 6.131)
+            .add_edge(1, 1, 2, 100.0, Frc::Frc3, Fow::SingleCarriageway)
+            .add_edge(2, 3, 4, 100.0, Frc::Frc3, Fow::SingleCarriageway) // Disconnected from 1-2
+            .build();
+
+        let start = *network.node_id_to_index.get(&1).unwrap();
+        let goal = *network.node_id_to_index.get(&4).unwrap(); // In different component
+        let goal_coord = network.node(goal).unwrap().coord;
+
+        let result = bounded_astar(&network, start, goal, goal_coord, 10000.0);
+
+        assert!(
+            result.is_none(),
+            "Should return None for disconnected nodes"
+        );
     }
 }
