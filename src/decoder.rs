@@ -606,9 +606,17 @@ impl<'a> Decoder<'a> {
             }
 
             // Build edge list: start_edge + middle edges + end_edge
-            let mut edges = vec![start_cand.edge_idx];
+            // Skip start/end edges if they contribute negligible length (< 3% of path)
+            // This avoids including spurious edges when an LRP is at a junction
+            const MIN_EDGE_CONTRIBUTION: f64 = 0.03; // 3% of path length
+            let mut edges = Vec::new();
+            if start_edge_partial / path_cost >= MIN_EDGE_CONTRIBUTION {
+                edges.push(start_cand.edge_idx);
+            }
             edges.extend(self.nodes_to_edges(&path_nodes));
-            if end_cand.edge_idx != start_cand.edge_idx {
+            if end_cand.edge_idx != start_cand.edge_idx
+                && end_edge_partial / path_cost >= MIN_EDGE_CONTRIBUTION
+            {
                 edges.push(end_cand.edge_idx);
             }
 
