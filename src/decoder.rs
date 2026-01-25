@@ -157,6 +157,25 @@ pub struct DecodedPath {
     pub positive_offset_m: f64,
     /// Negative offset (trim from end) in meters
     pub negative_offset_m: f64,
+    /// The edge ID that covers the most distance in the decoded path
+    pub primary_edge_id: u64,
+    /// The distance covered by the primary edge in meters
+    pub primary_edge_coverage_m: f64,
+}
+
+/// Information about edge coverage in a path segment
+#[derive(Debug, Clone)]
+struct EdgeCoverage {
+    edge_idx: EdgeIndex,
+    coverage_m: f64,
+}
+
+/// Result from path finding including edge coverage breakdown
+#[derive(Debug, Clone)]
+struct PathResult {
+    edges: Vec<EdgeIndex>,
+    coverages: Vec<EdgeCoverage>,
+    total_length: f64,
 }
 
 /// Configuration for the decoder
@@ -280,6 +299,8 @@ impl<'a> Decoder<'a> {
         // Build path between consecutive LRPs
         let mut full_path: Vec<EdgeIndex> = Vec::new();
         let mut total_length = 0.0;
+        // Track coverage per edge (edge may appear multiple times, so we aggregate)
+        let mut edge_coverage_map: HashMap<EdgeIndex, f64> = HashMap::new();
 
         for i in 0..points.len() - 1 {
             // Get distance to next point (path attributes are optional for last point)
@@ -289,7 +310,7 @@ impl<'a> Decoder<'a> {
                 .map(|p| p.dnp.meters())
                 .unwrap_or(0.0);
 
-            let (path_segment, segment_length) = self.find_best_path(
+            let path_result = self.find_best_path(
                 &all_candidates[i],
                 &all_candidates[i + 1],
                 expected_distance,
@@ -297,10 +318,15 @@ impl<'a> Decoder<'a> {
             )?;
 
             // Add the actual traversed length (accounts for partial edge traversals)
-            total_length += segment_length;
+            total_length += path_result.total_length;
+
+            // Accumulate edge coverages (aggregate if edge appears multiple times)
+            for coverage in &path_result.coverages {
+                *edge_coverage_map.entry(coverage.edge_idx).or_insert(0.0) += coverage.coverage_m;
+            }
 
             // Add edges to full path (avoid duplicating junction edges)
-            for (j, &edge_idx) in path_segment.iter().enumerate() {
+            for (j, &edge_idx) in path_result.edges.iter().enumerate() {
                 if j == 0 && !full_path.is_empty() {
                     // Skip first edge if it's the same as the last (junction)
                     if full_path.last() == Some(&edge_idx) {
@@ -311,6 +337,19 @@ impl<'a> Decoder<'a> {
             }
         }
 
+        // Find the primary edge (the one with maximum coverage)
+        let (primary_edge_idx, primary_coverage) = edge_coverage_map
+            .iter()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .map(|(&idx, &cov)| (idx, cov))
+            .unwrap_or_else(|| (full_path.first().copied().unwrap_or(EdgeIndex::new(0)), 0.0));
+
+        let primary_edge_id = self
+            .network
+            .edge(primary_edge_idx)
+            .map(|e| e.id)
+            .unwrap_or(0);
+
         // Extract offsets
         let positive_offset_m = line.offsets.pos.range();
         let negative_offset_m = line.offsets.neg.range();
@@ -320,6 +359,8 @@ impl<'a> Decoder<'a> {
             length_m: total_length,
             positive_offset_m,
             negative_offset_m,
+            primary_edge_id,
+            primary_edge_coverage_m: primary_coverage,
         })
     }
 
@@ -363,16 +404,41 @@ impl<'a> Decoder<'a> {
             .map(|p| p.dnp.meters())
             .unwrap_or(0.0);
 
-        let (path, total_length) =
+        let path_result =
             self.find_best_path(&all_candidates[0], &all_candidates[1], expected_distance, 0)?;
+
+        // Find the primary edge (the one with maximum coverage)
+        let (primary_edge_idx, primary_coverage) = path_result
+            .coverages
+            .iter()
+            .max_by(|a, b| a.coverage_m.partial_cmp(&b.coverage_m).unwrap())
+            .map(|c| (c.edge_idx, c.coverage_m))
+            .unwrap_or_else(|| {
+                (
+                    path_result
+                        .edges
+                        .first()
+                        .copied()
+                        .unwrap_or(EdgeIndex::new(0)),
+                    0.0,
+                )
+            });
+
+        let primary_edge_id = self
+            .network
+            .edge(primary_edge_idx)
+            .map(|e| e.id)
+            .unwrap_or(0);
 
         let positive_offset_m = pal.offset.range();
 
         Ok(DecodedPath {
-            edge_ids: self.edge_indices_to_ids(&path),
-            length_m: total_length,
+            edge_ids: self.edge_indices_to_ids(&path_result.edges),
+            length_m: path_result.total_length,
             positive_offset_m,
             negative_offset_m: 0.0,
+            primary_edge_id,
+            primary_edge_coverage_m: primary_coverage,
         })
     }
 
@@ -386,12 +452,12 @@ impl<'a> Decoder<'a> {
         expected_distance: f64,
         min_distance: f64,
         max_valid_distance: f64,
-    ) -> Option<(Vec<EdgeIndex>, f64)> {
+    ) -> Option<PathResult> {
         // Find edges that appear in both candidate lists
         // Only consider candidates with good spatial match (within 10m)
         const MAX_PROJECTION_DISTANCE: f64 = 10.0;
 
-        let mut best_same_edge: Option<(Vec<EdgeIndex>, f64, f64)> = None; // (edges, length, score)
+        let mut best_same_edge: Option<(EdgeIndex, f64, f64)> = None; // (edge_idx, length, score)
 
         for start_cand in start_candidates.iter().take(10) {
             if start_cand.distance_m > MAX_PROJECTION_DISTANCE {
@@ -436,23 +502,30 @@ impl<'a> Decoder<'a> {
 
                 // Track the best same-edge solution
                 if best_same_edge.is_none() || score < best_same_edge.as_ref().unwrap().2 {
-                    best_same_edge = Some((vec![start_cand.edge_idx], path_cost, score));
+                    best_same_edge = Some((start_cand.edge_idx, path_cost, score));
                 }
             }
         }
 
-        best_same_edge.map(|(edges, length, _score)| (edges, length))
+        best_same_edge.map(|(edge_idx, length, _score)| PathResult {
+            edges: vec![edge_idx],
+            coverages: vec![EdgeCoverage {
+                edge_idx,
+                coverage_m: length,
+            }],
+            total_length: length,
+        })
     }
 
     /// Find the best path between candidate sets
-    /// Returns (edges, actual_length_m)
+    /// Returns PathResult with edges, coverages, and total length
     fn find_best_path(
         &self,
         start_candidates: &[Candidate],
         end_candidates: &[Candidate],
         expected_distance: f64,
         lrp_index: usize,
-    ) -> Result<(Vec<EdgeIndex>, f64), DecodeError> {
+    ) -> Result<PathResult, DecodeError> {
         // Compute distance bounds using both relative and absolute tolerance
         // For short segments, absolute tolerance dominates; for long segments, relative dominates
         let rel_min = expected_distance * (1.0 - self.config.length_tolerance);
@@ -502,7 +575,7 @@ impl<'a> Decoder<'a> {
         // Sort by combined score (lower is better)
         pairs.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap());
 
-        let mut best_path: Option<(Vec<EdgeIndex>, f64)> = None;
+        let mut best_path: Option<PathResult> = None;
         let mut best_score = f64::MAX;
 
         // Try pairs in order of best combined candidate score
@@ -537,7 +610,14 @@ impl<'a> Decoder<'a> {
 
                             if score < best_score {
                                 best_score = score;
-                                best_path = Some((vec![start_cand.edge_idx], path_cost));
+                                best_path = Some(PathResult {
+                                    edges: vec![start_cand.edge_idx],
+                                    coverages: vec![EdgeCoverage {
+                                        edge_idx: start_cand.edge_idx,
+                                        coverage_m: path_cost,
+                                    }],
+                                    total_length: path_cost,
+                                });
 
                                 if length_diff < 0.1 {
                                     break;
@@ -610,14 +690,36 @@ impl<'a> Decoder<'a> {
             // This avoids including spurious edges when an LRP is at a junction
             const MIN_EDGE_CONTRIBUTION: f64 = 0.03; // 3% of path length
             let mut edges = Vec::new();
+            let mut coverages = Vec::new();
+
             if start_edge_partial / path_cost >= MIN_EDGE_CONTRIBUTION {
                 edges.push(start_cand.edge_idx);
+                coverages.push(EdgeCoverage {
+                    edge_idx: start_cand.edge_idx,
+                    coverage_m: start_edge_partial,
+                });
             }
-            edges.extend(self.nodes_to_edges(&path_nodes));
+
+            // Add middle edges with their full lengths
+            let middle_edges = self.nodes_to_edges(&path_nodes);
+            for &edge_idx in &middle_edges {
+                if let Some(edge) = self.network.edge(edge_idx) {
+                    edges.push(edge_idx);
+                    coverages.push(EdgeCoverage {
+                        edge_idx,
+                        coverage_m: edge.length_m,
+                    });
+                }
+            }
+
             if end_cand.edge_idx != start_cand.edge_idx
                 && end_edge_partial / path_cost >= MIN_EDGE_CONTRIBUTION
             {
                 edges.push(end_cand.edge_idx);
+                coverages.push(EdgeCoverage {
+                    edge_idx: end_cand.edge_idx,
+                    coverage_m: end_edge_partial,
+                });
             }
 
             // Score the path (additive for final ranking)
@@ -626,7 +728,11 @@ impl<'a> Decoder<'a> {
 
             if score < best_score {
                 best_score = score;
-                best_path = Some((edges, path_cost));
+                best_path = Some(PathResult {
+                    edges,
+                    coverages,
+                    total_length: path_cost,
+                });
 
                 // Early termination: if we found a good match, stop searching
                 // Since pairs are sorted by candidate quality, the first valid
