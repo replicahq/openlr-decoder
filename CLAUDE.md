@@ -166,6 +166,18 @@ uv sync
 uv run uvicorn app:app
 ```
 
+## Code Formatting
+
+Always format code before committing:
+
+```bash
+# Rust
+cargo fmt
+
+# Python
+ruff format .
+```
+
 ## Parquet Schema (Network Input)
 
 | Column | Type | Description |
