@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "openlr-decoder"
-version = "0.1.3"
+version = "0.1.4"
 description = "Fast OpenLR location reference decoder for Python"
 license = { text = "MIT" }
 authors = [{ name = "Replica", email = "engineering@replicahq.com" }]

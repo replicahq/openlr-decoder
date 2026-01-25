@@ -167,17 +167,25 @@ pub struct PyDecodedPath {
     /// Negative offset (trim from end) in meters
     #[pyo3(get)]
     pub negative_offset: f64,
+    /// The edge ID that covers the most distance in the decoded path
+    #[pyo3(get)]
+    pub primary_edge_id: u64,
+    /// The distance covered by the primary edge in meters
+    #[pyo3(get)]
+    pub primary_edge_coverage: f64,
 }
 
 #[pymethods]
 impl PyDecodedPath {
     fn __repr__(&self) -> String {
         format!(
-            "DecodedPath(edge_ids=[...{} edges], length={:.1}m, positive_offset={:.1}m, negative_offset={:.1}m)",
+            "DecodedPath(edge_ids=[...{} edges], length={:.1}m, positive_offset={:.1}m, negative_offset={:.1}m, primary_edge_id={}, primary_edge_coverage={:.1}m)",
             self.edge_ids.len(),
             self.length,
             self.positive_offset,
-            self.negative_offset
+            self.negative_offset,
+            self.primary_edge_id,
+            self.primary_edge_coverage
         )
     }
 }
@@ -189,6 +197,8 @@ impl From<DecodedPath> for PyDecodedPath {
             length: path.length_m,
             positive_offset: path.positive_offset_m,
             negative_offset: path.negative_offset_m,
+            primary_edge_id: path.primary_edge_id,
+            primary_edge_coverage: path.primary_edge_coverage_m,
         }
     }
 }
@@ -250,6 +260,8 @@ impl PyDecoder {
     ///     - length: float64 - path length in meters
     ///     - positive_offset: float64 - positive offset in meters
     ///     - negative_offset: float64 - negative offset in meters
+    ///     - primary_edge_id: uint64 - edge ID covering the most distance
+    ///     - primary_edge_coverage: float64 - distance covered by primary edge in meters
     ///     - error: string (nullable) - error message if decode failed, null if succeeded
     fn decode_batch(&self, py: Python<'_>, openlr_codes: Vec<String>) -> PyResult<Py<PyAny>> {
         let network = &self.network;
@@ -272,6 +284,8 @@ impl PyDecoder {
         let mut length_builder = Float64Builder::new();
         let mut pos_offset_builder = Float64Builder::new();
         let mut neg_offset_builder = Float64Builder::new();
+        let mut primary_edge_id_builder = UInt64Builder::new();
+        let mut primary_edge_coverage_builder = Float64Builder::new();
         let mut error_builder = StringBuilder::new();
 
         for result in results {
@@ -287,6 +301,8 @@ impl PyDecoder {
                     length_builder.append_value(path.length_m);
                     pos_offset_builder.append_value(path.positive_offset_m);
                     neg_offset_builder.append_value(path.negative_offset_m);
+                    primary_edge_id_builder.append_value(path.primary_edge_id);
+                    primary_edge_coverage_builder.append_value(path.primary_edge_coverage_m);
                     error_builder.append_null();
                 }
                 Err(e) => {
@@ -295,6 +311,8 @@ impl PyDecoder {
                     length_builder.append_null();
                     pos_offset_builder.append_null();
                     neg_offset_builder.append_null();
+                    primary_edge_id_builder.append_null();
+                    primary_edge_coverage_builder.append_null();
                     error_builder.append_value(decode_error_message(e));
                 }
             }
@@ -304,6 +322,8 @@ impl PyDecoder {
         let length: ArrayRef = Arc::new(length_builder.finish());
         let positive_offset: ArrayRef = Arc::new(pos_offset_builder.finish());
         let negative_offset: ArrayRef = Arc::new(neg_offset_builder.finish());
+        let primary_edge_id: ArrayRef = Arc::new(primary_edge_id_builder.finish());
+        let primary_edge_coverage: ArrayRef = Arc::new(primary_edge_coverage_builder.finish());
         let error: ArrayRef = Arc::new(error_builder.finish());
 
         let batch = RecordBatch::try_from_iter(vec![
@@ -311,6 +331,8 @@ impl PyDecoder {
             ("length", length),
             ("positive_offset", positive_offset),
             ("negative_offset", negative_offset),
+            ("primary_edge_id", primary_edge_id),
+            ("primary_edge_coverage", primary_edge_coverage),
             ("error", error),
         ])
         .map_err(|e| PyValueError::new_err(format!("Failed to create RecordBatch: {}", e)))?;
