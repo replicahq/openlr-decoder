@@ -296,6 +296,28 @@ impl<'a> Decoder<'a> {
             all_candidates.push(candidates);
         }
 
+        // Require at least one LRP to have a candidate within max_candidate_distance_m.
+        // This allows partial network coverage (one LRP outside network) while still
+        // rejecting cases where NO LRP has a good spatial match.
+        let max_dist = self.config.candidate_config.max_candidate_distance_m;
+        let has_close_candidate = all_candidates
+            .iter()
+            .any(|candidates| candidates.iter().any(|c| c.distance_m <= max_dist));
+
+        if !has_close_candidate {
+            // Find the LRP with the closest candidate to give a useful error
+            let (worst_idx, _) = all_candidates
+                .iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    let min_dist = c.iter().map(|c| c.distance_m).fold(f64::MAX, f64::min);
+                    (i, min_dist)
+                })
+                .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+                .unwrap_or((0, f64::MAX));
+            return Err(DecodeError::NoCandidates { index: worst_idx });
+        }
+
         // Build path between consecutive LRPs
         let mut full_path: Vec<EdgeIndex> = Vec::new();
         let mut total_length = 0.0;
@@ -396,6 +418,25 @@ impl<'a> Decoder<'a> {
             }
 
             all_candidates.push(candidates);
+        }
+
+        // Require at least one LRP to have a candidate within max_candidate_distance_m
+        let max_dist = self.config.candidate_config.max_candidate_distance_m;
+        let has_close_candidate = all_candidates
+            .iter()
+            .any(|candidates| candidates.iter().any(|c| c.distance_m <= max_dist));
+
+        if !has_close_candidate {
+            let (worst_idx, _) = all_candidates
+                .iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    let min_dist = c.iter().map(|c| c.distance_m).fold(f64::MAX, f64::min);
+                    (i, min_dist)
+                })
+                .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+                .unwrap_or((0, f64::MAX));
+            return Err(DecodeError::NoCandidates { index: worst_idx });
         }
 
         let expected_distance = points[0]
