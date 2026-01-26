@@ -122,6 +122,9 @@ pub struct PyDecoderConfig {
     /// Maximum number of candidates per LRP
     #[pyo3(get, set)]
     pub max_candidates: usize,
+    /// Maximum distance from LRP to candidate edge in meters
+    #[pyo3(get, set)]
+    pub max_candidate_distance_m: f64,
     /// Path length tolerance as a fraction (e.g., 0.20 = 20%)
     #[pyo3(get, set)]
     pub length_tolerance: f64,
@@ -136,13 +139,14 @@ pub struct PyDecoderConfig {
 #[pymethods]
 impl PyDecoderConfig {
     /// Create a new decoder configuration
-    /// All parameters are optional and default to values optimized for HERE map decoding
+    /// All parameters are optional and default to values optimized for cross-provider decoding
     #[new]
     #[pyo3(signature = (
         search_radius_m = 100.0,
         max_bearing_diff = 30.0,
-        frc_tolerance = 2,
+        frc_tolerance = 3,
         max_candidates = 10,
+        max_candidate_distance_m = 35.0,
         length_tolerance = 0.35,
         absolute_length_tolerance = 100.0,
         max_search_distance_factor = 2.0
@@ -152,6 +156,7 @@ impl PyDecoderConfig {
         max_bearing_diff: f64,
         frc_tolerance: u8,
         max_candidates: usize,
+        max_candidate_distance_m: f64,
         length_tolerance: f64,
         absolute_length_tolerance: f64,
         max_search_distance_factor: f64,
@@ -161,6 +166,7 @@ impl PyDecoderConfig {
             max_bearing_diff,
             frc_tolerance,
             max_candidates,
+            max_candidate_distance_m,
             length_tolerance,
             absolute_length_tolerance,
             max_search_distance_factor,
@@ -170,12 +176,13 @@ impl PyDecoderConfig {
     fn __repr__(&self) -> String {
         format!(
             "DecoderConfig(search_radius_m={}, max_bearing_diff={}, frc_tolerance={}, \
-             max_candidates={}, length_tolerance={}, absolute_length_tolerance={}, \
-             max_search_distance_factor={})",
+             max_candidates={}, max_candidate_distance_m={}, length_tolerance={}, \
+             absolute_length_tolerance={}, max_search_distance_factor={})",
             self.search_radius_m,
             self.max_bearing_diff,
             self.frc_tolerance,
             self.max_candidates,
+            self.max_candidate_distance_m,
             self.length_tolerance,
             self.absolute_length_tolerance,
             self.max_search_distance_factor
@@ -191,6 +198,7 @@ impl From<&PyDecoderConfig> for DecoderConfig {
                 max_bearing_diff: config.max_bearing_diff,
                 frc_tolerance: config.frc_tolerance,
                 max_candidates: config.max_candidates,
+                max_candidate_distance_m: config.max_candidate_distance_m,
                 ..CandidateConfig::default()
             },
             length_tolerance: config.length_tolerance,

@@ -23,6 +23,10 @@ pub struct CandidateConfig {
     pub max_bearing_diff: f64,
     pub frc_tolerance: u8,
     pub max_candidates: usize,
+    /// Maximum distance from LRP to edge for a valid candidate (meters).
+    /// Candidates beyond this distance are rejected even if they pass other filters.
+    /// This prevents matching to far-away roads when the correct road is missing.
+    pub max_candidate_distance_m: f64,
     // Scoring weights
     pub distance_weight: f64,
     pub bearing_weight: f64,
@@ -32,17 +36,19 @@ pub struct CandidateConfig {
 impl Default for CandidateConfig {
     fn default() -> Self {
         CandidateConfig {
-            search_radius_m: 100.0, // 100m search radius
+            search_radius_m: 100.0, // 100m search radius for spatial index query
             max_bearing_diff: 30.0, // ±30 degrees bearing tolerance
-            frc_tolerance: 2,       // Allow ±2 FRC classes
+            frc_tolerance: 3,       // Allow ±3 FRC classes (relaxed for cross-provider decoding)
             max_candidates: 10,     // Keep top 10 candidates
-            // Scoring weights for cross-provider decoding (HERE → OSM):
-            // Distance strongly dominates - LRP should be on top of the correct road
-            // Bearing helps distinguish parallel roads going different directions
-            // FRC is just a tiebreaker since mappings between providers differ
-            distance_weight: 4.0, // Primary - closest road strongly wins
-            bearing_weight: 0.2,  // Minor tiebreaker for parallel roads
-            frc_weight: 0.1,      // Minimal - FRC mappings are very approximate
+            max_candidate_distance_m: 35.0, // Reject candidates > 35m from LRP
+            // Scoring weights for cross-provider decoding:
+            // Distance heavily dominates - a spatially close match with wrong FRC
+            // is almost always better than a farther match with correct FRC.
+            // Bearing is a minor tiebreaker for parallel roads.
+            // FRC is nearly ignored since cross-provider mappings are unreliable.
+            distance_weight: 10.0, // Dominant - closest road almost always wins
+            bearing_weight: 0.2,   // Minor tiebreaker for parallel roads
+            frc_weight: 0.05,      // Negligible - FRC mappings are unreliable across providers
         }
     }
 }
@@ -64,6 +70,12 @@ pub fn find_candidates(
         .into_iter()
         .filter_map(|(env, distance_m)| {
             let edge = network.edge(env.edge_idx)?;
+
+            // Check maximum distance threshold - reject candidates too far from LRP
+            // This prevents matching to far-away roads when the correct road is missing
+            if distance_m > config.max_candidate_distance_m {
+                return None;
+            }
 
             // Compute bearing at the projection point (where LRP projects onto edge)
             let edge_bearing = bearing_at_projection(coord, &env.geometry);
@@ -198,8 +210,8 @@ mod tests {
         assert!(score_50m < score_100m);
 
         // At max search radius (100m), distance component should contribute
-        // distance_weight * (100 / 100) = 4.0 * 1.0 = 4.0
-        assert!((score_100m - 4.0).abs() < 0.001);
+        // distance_weight * (100 / 100) = 10.0 * 1.0 = 10.0
+        assert!((score_100m - 10.0).abs() < 0.001);
     }
 
     #[test]
@@ -228,27 +240,29 @@ mod tests {
         let score_frc0 = compute_score(0.0, 0.0, 0, &config);
         let score_frc1 = compute_score(0.0, 0.0, 1, &config);
         let score_frc2 = compute_score(0.0, 0.0, 2, &config);
+        let score_frc3 = compute_score(0.0, 0.0, 3, &config);
 
         // Scores should increase with FRC difference
         assert!(score_frc0 < score_frc1);
         assert!(score_frc1 < score_frc2);
+        assert!(score_frc2 < score_frc3);
 
-        // At max FRC diff (2), FRC component should contribute
-        // frc_weight * (2 / 2) = 0.1 * 1.0 = 0.1
-        assert!((score_frc2 - 0.1).abs() < 0.001);
+        // At max FRC diff (3), FRC component should contribute
+        // frc_weight * (3 / 3) = 0.05 * 1.0 = 0.05
+        assert!((score_frc3 - 0.05).abs() < 0.001);
     }
 
     #[test]
     fn test_compute_score_distance_dominates() {
         let config = CandidateConfig::default();
 
-        // Distance should dominate scoring (weight 4.0 vs 0.2 and 0.1)
+        // Distance should dominate scoring (weight 10.0 vs 0.2 and 0.05)
         // A closer edge with worse bearing/frc should beat a farther edge with perfect bearing/frc
-        let close_bad_bearing = compute_score(10.0, 30.0, 2, &config);
+        let close_bad_bearing = compute_score(10.0, 30.0, 3, &config);
         let far_perfect = compute_score(50.0, 0.0, 0, &config);
 
-        // close_bad_bearing = 4.0 * 0.1 + 0.2 * 1.0 + 0.1 * 1.0 = 0.4 + 0.2 + 0.1 = 0.7
-        // far_perfect = 4.0 * 0.5 + 0 + 0 = 2.0
+        // close_bad_bearing = 10.0 * 0.1 + 0.2 * 1.0 + 0.05 * 1.0 = 1.0 + 0.2 + 0.05 = 1.25
+        // far_perfect = 10.0 * 0.5 + 0 + 0 = 5.0
         assert!(close_bad_bearing < far_perfect);
     }
 
@@ -458,6 +472,7 @@ mod tests {
             max_bearing_diff: 45.0,
             frc_tolerance: 3,
             max_candidates: 5,
+            max_candidate_distance_m: 50.0,
             distance_weight: 1.0,
             bearing_weight: 1.0,
             frc_weight: 1.0,
