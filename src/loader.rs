@@ -6,17 +6,43 @@ use std::path::Path;
 
 use anyhow::{anyhow, Context, Result};
 use arrow::array::{
-    Array, BinaryArray, BinaryViewArray, Float64Array, Int64Array, LargeBinaryArray,
+    Array, ArrayRef, BinaryArray, BinaryViewArray, Float64Array, Int64Array, LargeBinaryArray,
     LargeStringArray, RecordBatch, StringArray, StringViewArray, UInt64Array,
 };
 use arrow::datatypes::{DataType, Field, Schema};
 use geo::{LineString, Point};
-use geozero::wkb;
-use geozero::ToGeo;
+use geoarrow_array::array::LineStringArray;
+use geoarrow_array::{GeoArrowArray, GeoArrowArrayAccessor};
+use geoarrow_schema::GeoArrowType;
+use geozero::{wkb, wkt, ToGeo};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use crate::graph::{Edge, Fow, Frc, Node, RoadNetwork};
 use crate::spatial::{EdgeEnvelope, SpatialIndex};
+
+/// Geometry column format detected from Arrow schema
+enum GeometryFormat<'a> {
+    /// WKB binary (Binary, LargeBinary, BinaryView)
+    Wkb(WkbSource<'a>),
+    /// WKT string (String, LargeString, StringView)
+    Wkt(WktSource<'a>),
+    /// GeoArrow native LineString
+    GeoArrow(LineStringArray),
+    /// No geometry column present
+    None,
+}
+
+enum WkbSource<'a> {
+    Binary(&'a BinaryArray),
+    LargeBinary(&'a LargeBinaryArray),
+    BinaryView(&'a BinaryViewArray),
+}
+
+enum WktSource<'a> {
+    String(&'a StringArray),
+    LargeString(&'a LargeStringArray),
+    StringView(&'a StringViewArray),
+}
 
 /// Returns the expected Arrow schema for road network parquet files.
 ///
@@ -29,7 +55,10 @@ use crate::spatial::{EdgeEnvelope, SpatialIndex};
 ///
 /// Optional columns:
 /// - `lanes` (Int64): number of lanes, used for Form of Way inference
-/// - `geometry` (Binary): WKB-encoded LineString geometry
+/// - `geometry`: LineString geometry in one of these formats:
+///   - WKB: Binary, LargeBinary, or BinaryView
+///   - WKT: String, LargeString, or StringView
+///   - GeoArrow native: List<Struct<x,y>> with geoarrow.linestring extension
 pub fn road_network_schema() -> Schema {
     Schema::new(vec![
         Field::new("stableEdgeId", DataType::UInt64, false),
@@ -76,7 +105,7 @@ pub fn load_network_from_parquet(path: &Path) -> Result<(RoadNetwork, SpatialInd
 /// - `startLat`, `startLon`, `endLat`, `endLon` (Float64): endpoint coordinates
 /// - `highway` (Utf8): OSM highway tag
 /// - `lanes` (Int64, optional): number of lanes for FOW inference
-/// - `geometry` (Binary, optional): WKB-encoded LineString geometry
+/// - `geometry` (optional): LineString geometry in WKB, WKT, or GeoArrow native format
 pub fn build_network_from_batches<I>(batches: I) -> Result<(RoadNetwork, SpatialIndex)>
 where
     I: Iterator<Item = Result<RecordBatch>>,
@@ -148,11 +177,8 @@ fn process_batch(
         .column_by_name("lanes")
         .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
 
-    // Geometry can be Binary, LargeBinary, or BinaryView (Polars PyCapsule uses view types)
-    let geometry_col = batch.column_by_name("geometry");
-    let geometry_binary = geometry_col.and_then(|c| c.as_any().downcast_ref::<BinaryArray>());
-    let geometry_large = geometry_col.and_then(|c| c.as_any().downcast_ref::<LargeBinaryArray>());
-    let geometry_view = geometry_col.and_then(|c| c.as_any().downcast_ref::<BinaryViewArray>());
+    // Detect geometry format: WKB (binary), WKT (string), or GeoArrow native
+    let geometry_format = detect_geometry_format(batch);
 
     // All required columns must be present (highway can be String or LargeString)
     let (stable_edge_id, start_vertex, end_vertex, start_lat, start_lon, end_lat, end_lon) =
@@ -223,30 +249,47 @@ fn process_batch(
         });
         let fow = Fow::from_osm_tags(hw_tag, None, None, lane_count);
 
-        // Parse geometry (handle Binary, LargeBinary, and BinaryView)
-        let geom: LineString<f64> = if let Some(geom_col) = geometry_binary {
-            if !geom_col.is_null(row) {
-                parse_wkb_linestring(geom_col.value(row))
-                    .unwrap_or_else(|| LineString::from(vec![(sv_lon, sv_lat), (ev_lon, ev_lat)]))
-            } else {
-                LineString::from(vec![(sv_lon, sv_lat), (ev_lon, ev_lat)])
+        // Parse geometry based on detected format
+        let fallback = || LineString::from(vec![(sv_lon, sv_lat), (ev_lon, ev_lat)]);
+        let geom: LineString<f64> = match &geometry_format {
+            GeometryFormat::Wkb(source) => {
+                let bytes = match source {
+                    WkbSource::Binary(arr) => {
+                        if arr.is_null(row) { None } else { Some(arr.value(row)) }
+                    }
+                    WkbSource::LargeBinary(arr) => {
+                        if arr.is_null(row) { None } else { Some(arr.value(row)) }
+                    }
+                    WkbSource::BinaryView(arr) => {
+                        if arr.is_null(row) { None } else { Some(arr.value(row)) }
+                    }
+                };
+                bytes
+                    .and_then(parse_wkb_linestring)
+                    .unwrap_or_else(fallback)
             }
-        } else if let Some(geom_col) = geometry_large {
-            if !geom_col.is_null(row) {
-                parse_wkb_linestring(geom_col.value(row))
-                    .unwrap_or_else(|| LineString::from(vec![(sv_lon, sv_lat), (ev_lon, ev_lat)]))
-            } else {
-                LineString::from(vec![(sv_lon, sv_lat), (ev_lon, ev_lat)])
+            GeometryFormat::Wkt(source) => {
+                let text = match source {
+                    WktSource::String(arr) => {
+                        if arr.is_null(row) { None } else { Some(arr.value(row)) }
+                    }
+                    WktSource::LargeString(arr) => {
+                        if arr.is_null(row) { None } else { Some(arr.value(row)) }
+                    }
+                    WktSource::StringView(arr) => {
+                        if arr.is_null(row) { None } else { Some(arr.value(row)) }
+                    }
+                };
+                text.and_then(parse_wkt_linestring).unwrap_or_else(fallback)
             }
-        } else if let Some(geom_col) = geometry_view {
-            if !geom_col.is_null(row) {
-                parse_wkb_linestring(geom_col.value(row))
-                    .unwrap_or_else(|| LineString::from(vec![(sv_lon, sv_lat), (ev_lon, ev_lat)]))
-            } else {
-                LineString::from(vec![(sv_lon, sv_lat), (ev_lon, ev_lat)])
+            GeometryFormat::GeoArrow(arr) => {
+                if arr.is_null(row) {
+                    fallback()
+                } else {
+                    parse_geoarrow_linestring(arr, row).unwrap_or_else(fallback)
+                }
             }
-        } else {
-            LineString::from(vec![(sv_lon, sv_lat), (ev_lon, ev_lat)])
+            GeometryFormat::None => fallback(),
         };
 
         // Create edge
@@ -260,17 +303,88 @@ fn process_batch(
     Ok(())
 }
 
+/// Detect the geometry format from the batch schema and data.
+fn detect_geometry_format<'a>(batch: &'a RecordBatch) -> GeometryFormat<'a> {
+    let schema = batch.schema();
+    let Some((idx, field)) = schema.column_with_name("geometry") else {
+        return GeometryFormat::None;
+    };
+    let col = batch.column(idx);
+
+    // Check for GeoArrow extension type metadata
+    if let Some(ext_name) = field.metadata().get("ARROW:extension:name") {
+        if ext_name.starts_with("geoarrow.linestring") {
+            // Try to parse as GeoArrow LineString
+            if let Some(arr) = try_parse_geoarrow_linestring(col.clone(), field) {
+                return GeometryFormat::GeoArrow(arr);
+            }
+        }
+    }
+
+    // Check for binary types (WKB)
+    if let Some(arr) = col.as_any().downcast_ref::<BinaryArray>() {
+        return GeometryFormat::Wkb(WkbSource::Binary(arr));
+    }
+    if let Some(arr) = col.as_any().downcast_ref::<LargeBinaryArray>() {
+        return GeometryFormat::Wkb(WkbSource::LargeBinary(arr));
+    }
+    if let Some(arr) = col.as_any().downcast_ref::<BinaryViewArray>() {
+        return GeometryFormat::Wkb(WkbSource::BinaryView(arr));
+    }
+
+    // Check for string types (WKT)
+    if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
+        return GeometryFormat::Wkt(WktSource::String(arr));
+    }
+    if let Some(arr) = col.as_any().downcast_ref::<LargeStringArray>() {
+        return GeometryFormat::Wkt(WktSource::LargeString(arr));
+    }
+    if let Some(arr) = col.as_any().downcast_ref::<StringViewArray>() {
+        return GeometryFormat::Wkt(WktSource::StringView(arr));
+    }
+
+    GeometryFormat::None
+}
+
+/// Try to parse an Arrow array as a GeoArrow LineString array.
+fn try_parse_geoarrow_linestring(col: ArrayRef, field: &Field) -> Option<LineStringArray> {
+    // Parse the GeoArrow type from field metadata
+    let geo_type = GeoArrowType::try_from(field).ok()?;
+    let line_type = match geo_type {
+        GeoArrowType::LineString(t) => t,
+        _ => return None,
+    };
+
+    // Try to convert the array
+    LineStringArray::try_from((col.as_ref(), line_type)).ok()
+}
+
 /// Parse WKB bytes into a LineString
 fn parse_wkb_linestring(wkb_bytes: &[u8]) -> Option<LineString<f64>> {
-    // Use geozero to parse WKB
     let geom = wkb::Wkb(wkb_bytes.to_vec()).to_geo().ok()?;
+    extract_linestring(geom)
+}
 
+/// Parse WKT string into a LineString
+fn parse_wkt_linestring(wkt_str: &str) -> Option<LineString<f64>> {
+    let geom = wkt::Wkt(wkt_str).to_geo().ok()?;
+    extract_linestring(geom)
+}
+
+/// Parse a GeoArrow LineString at a specific row index
+fn parse_geoarrow_linestring(arr: &LineStringArray, row: usize) -> Option<LineString<f64>> {
+    use geo_traits::{CoordTrait, LineStringTrait};
+
+    let ls = arr.value(row).ok()?;
+    let coords: Vec<_> = ls.coords().map(|c| (c.x(), c.y())).collect();
+    Some(LineString::from(coords))
+}
+
+/// Extract a LineString from a geo::Geometry
+fn extract_linestring(geom: geo::Geometry<f64>) -> Option<LineString<f64>> {
     match geom {
         geo::Geometry::LineString(ls) => Some(ls),
-        geo::Geometry::MultiLineString(mls) => {
-            // Take the first linestring if it's a multi
-            mls.0.into_iter().next()
-        }
+        geo::Geometry::MultiLineString(mls) => mls.0.into_iter().next(),
         _ => None,
     }
 }
@@ -309,10 +423,205 @@ pub fn load_openlr_codes(path: &Path) -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn test_frc_highway_mapping() {
         assert_eq!(Frc::from_osm_highway("motorway"), Frc::Frc0);
         assert_eq!(Frc::from_osm_highway("residential"), Frc::Frc5);
+    }
+
+    #[test]
+    fn test_parse_wkb_linestring() {
+        // WKB for LINESTRING(0 0, 1 1, 2 2) - little endian
+        let wkb: Vec<u8> = vec![
+            0x01, // Little endian
+            0x02, 0x00, 0x00, 0x00, // Type: LineString (2)
+            0x03, 0x00, 0x00, 0x00, // Number of points: 3
+            // Point 1: (0, 0)
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // x = 0.0
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // y = 0.0
+            // Point 2: (1, 1)
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x3f, // x = 1.0
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x3f, // y = 1.0
+            // Point 3: (2, 2)
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, // x = 2.0
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, // y = 2.0
+        ];
+
+        let result = parse_wkb_linestring(&wkb);
+        assert!(result.is_some());
+
+        let ls = result.unwrap();
+        assert_eq!(ls.0.len(), 3);
+        assert_eq!(ls.0[0].x, 0.0);
+        assert_eq!(ls.0[0].y, 0.0);
+        assert_eq!(ls.0[1].x, 1.0);
+        assert_eq!(ls.0[1].y, 1.0);
+        assert_eq!(ls.0[2].x, 2.0);
+        assert_eq!(ls.0[2].y, 2.0);
+    }
+
+    #[test]
+    fn test_parse_wkb_invalid() {
+        // Invalid WKB bytes
+        let result = parse_wkb_linestring(&[0x00, 0x01, 0x02]);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_wkt_linestring() {
+        let wkt = "LINESTRING(0 0, 1 1, 2 2)";
+        let result = parse_wkt_linestring(wkt);
+        assert!(result.is_some());
+
+        let ls = result.unwrap();
+        assert_eq!(ls.0.len(), 3);
+        assert_eq!(ls.0[0].x, 0.0);
+        assert_eq!(ls.0[0].y, 0.0);
+        assert_eq!(ls.0[1].x, 1.0);
+        assert_eq!(ls.0[1].y, 1.0);
+        assert_eq!(ls.0[2].x, 2.0);
+        assert_eq!(ls.0[2].y, 2.0);
+    }
+
+    #[test]
+    fn test_parse_wkt_linestring_with_decimals() {
+        let wkt = "LINESTRING(-122.4194 37.7749, -122.4089 37.7849)";
+        let result = parse_wkt_linestring(wkt);
+        assert!(result.is_some());
+
+        let ls = result.unwrap();
+        assert_eq!(ls.0.len(), 2);
+        assert!((ls.0[0].x - (-122.4194)).abs() < 1e-10);
+        assert!((ls.0[0].y - 37.7749).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_parse_wkt_invalid() {
+        let result = parse_wkt_linestring("not valid wkt");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_wkt_wrong_geometry_type() {
+        // Point geometry should return None (we expect LineString)
+        let result = parse_wkt_linestring("POINT(0 0)");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_geoarrow_linestring() {
+        use arrow::array::StructArray;
+        use arrow::datatypes::{DataType, Field, Fields};
+        use geoarrow_schema::{Dimension, LineStringType, Metadata};
+
+        // Build a GeoArrow LineString array manually
+        // GeoArrow LineString is List<Struct<x: f64, y: f64>>
+        let x_field = Field::new("x", DataType::Float64, false);
+        let y_field = Field::new("y", DataType::Float64, false);
+        let coord_fields = Fields::from(vec![x_field.clone(), y_field.clone()]);
+
+        // Create coordinate arrays for one linestring with 3 points: (0,0), (1,1), (2,2)
+        let x_values: Vec<f64> = vec![0.0, 1.0, 2.0];
+        let y_values: Vec<f64> = vec![0.0, 1.0, 2.0];
+
+        let x_array = Arc::new(arrow::array::Float64Array::from(x_values)) as arrow::array::ArrayRef;
+        let y_array = Arc::new(arrow::array::Float64Array::from(y_values)) as arrow::array::ArrayRef;
+
+        let coord_struct = StructArray::new(coord_fields, vec![x_array, y_array], None);
+
+        // Create list array with one linestring containing all 3 coords
+        let offsets = arrow::buffer::OffsetBuffer::new(vec![0i32, 3].into());
+        let list_array = arrow::array::ListArray::new(
+            Arc::new(Field::new_struct(
+                "vertices",
+                coord_struct.fields().clone(),
+                false,
+            )),
+            offsets,
+            Arc::new(coord_struct),
+            None,
+        );
+
+        // Convert to GeoArrow LineStringArray
+        let line_type =
+            LineStringType::new(Dimension::XY, Arc::new(Metadata::default()))
+                .with_coord_type(geoarrow_schema::CoordType::Separated);
+        let geoarrow_arr = LineStringArray::try_from((&list_array, line_type)).unwrap();
+
+        // Test parsing
+        let result = parse_geoarrow_linestring(&geoarrow_arr, 0);
+        assert!(result.is_some());
+
+        let ls = result.unwrap();
+        assert_eq!(ls.0.len(), 3);
+        assert_eq!(ls.0[0].x, 0.0);
+        assert_eq!(ls.0[0].y, 0.0);
+        assert_eq!(ls.0[1].x, 1.0);
+        assert_eq!(ls.0[1].y, 1.0);
+        assert_eq!(ls.0[2].x, 2.0);
+        assert_eq!(ls.0[2].y, 2.0);
+    }
+
+    #[test]
+    fn test_detect_geometry_format_wkb() {
+        use arrow::array::BinaryArray;
+        use arrow::datatypes::{Field, Schema};
+
+        // Create a batch with a binary geometry column
+        let wkb_data: Vec<Option<&[u8]>> = vec![Some(&[0x01, 0x02])];
+        let geom_array = BinaryArray::from(wkb_data);
+
+        let schema = Schema::new(vec![Field::new("geometry", DataType::Binary, true)]);
+
+        let batch = RecordBatch::try_new(
+            Arc::new(schema),
+            vec![Arc::new(geom_array)],
+        )
+        .unwrap();
+
+        let format = detect_geometry_format(&batch);
+        assert!(matches!(format, GeometryFormat::Wkb(WkbSource::Binary(_))));
+    }
+
+    #[test]
+    fn test_detect_geometry_format_wkt() {
+        use arrow::datatypes::{Field, Schema};
+
+        // Create a batch with a string geometry column
+        let wkt_data = vec![Some("LINESTRING(0 0, 1 1)")];
+        let geom_array = StringArray::from(wkt_data);
+
+        let schema = Schema::new(vec![Field::new("geometry", DataType::Utf8, true)]);
+
+        let batch = RecordBatch::try_new(
+            Arc::new(schema),
+            vec![Arc::new(geom_array)],
+        )
+        .unwrap();
+
+        let format = detect_geometry_format(&batch);
+        assert!(matches!(format, GeometryFormat::Wkt(WktSource::String(_))));
+    }
+
+    #[test]
+    fn test_detect_geometry_format_none() {
+        use arrow::datatypes::{Field, Schema};
+
+        // Create a batch without a geometry column
+        let data = vec![Some(1i64), Some(2i64)];
+        let array = Int64Array::from(data);
+
+        let schema = Schema::new(vec![Field::new("other_column", DataType::Int64, true)]);
+
+        let batch = RecordBatch::try_new(
+            Arc::new(schema),
+            vec![Arc::new(array)],
+        )
+        .unwrap();
+
+        let format = detect_geometry_format(&batch);
+        assert!(matches!(format, GeometryFormat::None));
     }
 }
