@@ -32,6 +32,8 @@ Example:
     ...         print(path.length)
 """
 
+from importlib.metadata import version
+
 from openlr_decoder._openlr_decoder import (
     RoadNetwork,
     Decoder,
@@ -46,6 +48,7 @@ __all__ = [
     "DecoderConfig",
     "DecodedPath",
     "road_network_schema",
+    "__version__",
 ]
 
-__version__ = "0.1.1"
+__version__ = version("openlr-decoder")
