@@ -4,17 +4,17 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::{ArrayRef, Float64Builder, ListBuilder, StringBuilder, UInt64Builder};
-use arrow::pyarrow::ToPyArrow;
 use arrow::record_batch::RecordBatch;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::Py;
+use pyo3_arrow::{PyRecordBatch, PyRecordBatchReader, PySchema};
 use rayon::prelude::*;
 
 use crate::candidates::CandidateConfig;
 use crate::decoder::{DecodeError, DecodedPath, Decoder, DecoderConfig};
 use crate::graph::RoadNetwork;
-use crate::loader::load_network_from_parquet;
+use crate::loader::{build_network_from_batches, load_network_from_parquet};
 use crate::spatial::SpatialIndex;
 
 /// Python-exposed road network loaded from parquet
@@ -38,6 +38,54 @@ impl PyRoadNetwork {
     fn from_parquet(path: &str) -> PyResult<Self> {
         let (network, spatial) = load_network_from_parquet(Path::new(path))
             .map_err(|e| PyValueError::new_err(format!("Failed to load network: {}", e)))?;
+
+        Ok(PyRoadNetwork {
+            network: Arc::new(network),
+            spatial: Arc::new(spatial),
+        })
+    }
+
+    /// Load a road network from Arrow data (zero-copy).
+    ///
+    /// This method accepts any Arrow-compatible data source via the Arrow PyCapsule
+    /// interface, including:
+    /// - PyArrow Table or RecordBatch
+    /// - PyArrow RecordBatchReader
+    /// - Polars DataFrame (zero-copy via Arrow)
+    /// - Any object implementing __arrow_c_stream__ or __arrow_c_array__
+    ///
+    /// Args:
+    ///     data: Arrow-compatible data with the road network schema.
+    ///           Must have columns: stableEdgeId (uint64), startVertex (int64),
+    ///           endVertex (int64), startLat/startLon/endLat/endLon (float64),
+    ///           highway (string). Optional: lanes (int64), geometry (binary/WKB).
+    ///
+    /// Returns:
+    ///     RoadNetwork: The loaded road network ready for decoding
+    ///
+    /// Example:
+    ///     >>> import pyarrow as pa
+    ///     >>> table = pa.parquet.read_table("network.parquet")
+    ///     >>> network = RoadNetwork.from_arrow(table)
+    ///
+    ///     >>> import polars as pl
+    ///     >>> df = pl.read_parquet("network.parquet")
+    ///     >>> network = RoadNetwork.from_arrow(df)  # Zero-copy!
+    #[staticmethod]
+    #[pyo3(signature = (data))]
+    fn from_arrow(data: PyRecordBatchReader) -> PyResult<Self> {
+        // Convert to arrow-rs RecordBatchReader via pyo3-arrow (zero-copy)
+        let reader = data
+            .into_reader()
+            .map_err(|e| PyValueError::new_err(format!("Failed to read Arrow data: {}", e)))?;
+
+        // Build network from the batches
+        let (network, spatial) = build_network_from_batches(
+            reader.map(|r| r.map_err(|e| anyhow::anyhow!(e))),
+        )
+        .map_err(|e| {
+            PyValueError::new_err(format!("Failed to build network from Arrow data: {}", e))
+        })?;
 
         Ok(PyRoadNetwork {
             network: Arc::new(network),
@@ -337,9 +385,10 @@ impl PyDecoder {
         ])
         .map_err(|e| PyValueError::new_err(format!("Failed to create RecordBatch: {}", e)))?;
 
-        batch
-            .to_pyarrow(py)
-            .map(|bound| bound.unbind())
+        // Convert to PyArrow via pyo3-arrow
+        PyRecordBatch::new(batch)
+            .into_pyarrow(py)
+            .map(|b| b.unbind())
             .map_err(|e| PyValueError::new_err(format!("Failed to convert to PyArrow: {}", e)))
     }
 }
@@ -347,9 +396,10 @@ impl PyDecoder {
 /// Get the expected PyArrow schema for road network parquet files
 #[pyfunction]
 fn road_network_schema(py: Python<'_>) -> PyResult<Py<PyAny>> {
-    crate::loader::road_network_schema()
-        .to_pyarrow(py)
-        .map(|bound| bound.unbind())
+    let schema = Arc::new(crate::loader::road_network_schema());
+    PySchema::new(schema)
+        .into_pyarrow(py)
+        .map(|b| b.unbind())
         .map_err(|e| PyValueError::new_err(format!("Failed to convert schema: {}", e)))
 }
 
