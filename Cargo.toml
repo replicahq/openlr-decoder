@@ -19,18 +19,19 @@ rstar = "0.12"
 geo = { version = "0.28", features = ["serde"] }
 geo-types = { version = "0.7", features = ["serde"] }
 parquet = { version = "57", features = ["arrow"] }
-arrow = { version = "57", features = ["ffi", "pyarrow"] }
+arrow = { version = "57", features = ["ffi"] }
 geozero = { version = "0.14", features = ["with-wkb", "with-geo"] }
 rayon = "1.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 anyhow = "1"
-pyo3 = { version = "0.26", features = ["extension-module"], optional = true }
+pyo3 = { version = "0.27", features = ["extension-module"], optional = true }
+pyo3-arrow = { version = "0.15", optional = true }
 
 [features]
 default = []
-python = ["pyo3"]
+python = ["pyo3", "pyo3-arrow"]
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

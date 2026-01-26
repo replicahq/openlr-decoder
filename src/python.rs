@@ -4,12 +4,11 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::{ArrayRef, Float64Builder, ListBuilder, StringBuilder, UInt64Builder};
-use arrow::pyarrow::{FromPyArrow, ToPyArrow};
 use arrow::record_batch::RecordBatch;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::PyIterator;
 use pyo3::Py;
+use pyo3_arrow::{PyRecordBatch, PyRecordBatchReader, PySchema};
 use rayon::prelude::*;
 
 use crate::candidates::CandidateConfig;
@@ -48,15 +47,15 @@ impl PyRoadNetwork {
 
     /// Load a road network from Arrow data (zero-copy).
     ///
-    /// This method accepts PyArrow data sources:
-    /// - PyArrow Table
-    /// - PyArrow RecordBatch
-    /// - List of PyArrow RecordBatches
-    ///
-    /// For Polars DataFrames, convert to Arrow first: `df.to_arrow()`
+    /// This method accepts any Arrow-compatible data source via the Arrow PyCapsule
+    /// interface, including:
+    /// - PyArrow Table or RecordBatch
+    /// - PyArrow RecordBatchReader
+    /// - Polars DataFrame (zero-copy via Arrow)
+    /// - Any object implementing __arrow_c_stream__ or __arrow_c_array__
     ///
     /// Args:
-    ///     data: PyArrow Table, RecordBatch, or list of RecordBatches.
+    ///     data: Arrow-compatible data with the road network schema.
     ///           Must have columns: stableEdgeId (uint64), startVertex (int64),
     ///           endVertex (int64), startLat/startLon/endLat/endLon (float64),
     ///           highway (string). Optional: lanes (int64), geometry (binary/WKB).
@@ -71,18 +70,22 @@ impl PyRoadNetwork {
     ///
     ///     >>> import polars as pl
     ///     >>> df = pl.read_parquet("network.parquet")
-    ///     >>> network = RoadNetwork.from_arrow(df.to_arrow())
+    ///     >>> network = RoadNetwork.from_arrow(df)  # Zero-copy!
     #[staticmethod]
     #[pyo3(signature = (data))]
-    fn from_arrow(py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<Self> {
-        // Collect batches from the Python object
-        let batches = extract_record_batches(py, data)?;
+    fn from_arrow(data: PyRecordBatchReader) -> PyResult<Self> {
+        // Convert to arrow-rs RecordBatchReader via pyo3-arrow (zero-copy)
+        let reader = data
+            .into_reader()
+            .map_err(|e| PyValueError::new_err(format!("Failed to read Arrow data: {}", e)))?;
 
-        // Build network from the batches (zero-copy from Python)
-        let (network, spatial) =
-            build_network_from_batches(batches.into_iter().map(Ok)).map_err(|e| {
-                PyValueError::new_err(format!("Failed to build network from Arrow data: {}", e))
-            })?;
+        // Build network from the batches
+        let (network, spatial) = build_network_from_batches(
+            reader.map(|r| r.map_err(|e| anyhow::anyhow!(e))),
+        )
+        .map_err(|e| {
+            PyValueError::new_err(format!("Failed to build network from Arrow data: {}", e))
+        })?;
 
         Ok(PyRoadNetwork {
             network: Arc::new(network),
@@ -382,9 +385,10 @@ impl PyDecoder {
         ])
         .map_err(|e| PyValueError::new_err(format!("Failed to create RecordBatch: {}", e)))?;
 
-        batch
-            .to_pyarrow(py)
-            .map(|bound| bound.unbind())
+        // Convert to PyArrow via pyo3-arrow
+        PyRecordBatch::new(batch)
+            .into_pyarrow(py)
+            .map(|b| b.unbind())
             .map_err(|e| PyValueError::new_err(format!("Failed to convert to PyArrow: {}", e)))
     }
 }
@@ -392,62 +396,11 @@ impl PyDecoder {
 /// Get the expected PyArrow schema for road network parquet files
 #[pyfunction]
 fn road_network_schema(py: Python<'_>) -> PyResult<Py<PyAny>> {
-    crate::loader::road_network_schema()
-        .to_pyarrow(py)
-        .map(|bound| bound.unbind())
+    let schema = Arc::new(crate::loader::road_network_schema());
+    PySchema::new(schema)
+        .into_pyarrow(py)
+        .map(|b| b.unbind())
         .map_err(|e| PyValueError::new_err(format!("Failed to convert schema: {}", e)))
-}
-
-/// Extract RecordBatches from a PyArrow object (Table, RecordBatch, or list of batches).
-///
-/// Supports:
-/// - pyarrow.Table (converted via to_batches())
-/// - pyarrow.RecordBatch (single batch)
-/// - List/iterable of pyarrow.RecordBatch
-fn extract_record_batches(py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<Vec<RecordBatch>> {
-    // Check if it's a PyArrow Table (has to_batches method)
-    if let Ok(batches_method) = data.getattr("to_batches") {
-        // It's a Table - call to_batches() to get a list of RecordBatches
-        let batches_list = batches_method.call0()?;
-        return extract_batch_list(py, &batches_list);
-    }
-
-    // Check if it's a single RecordBatch (try direct conversion)
-    if let Ok(batch) = RecordBatch::from_pyarrow_bound(data) {
-        return Ok(vec![batch]);
-    }
-
-    // Try as an iterable of RecordBatches
-    if let Ok(iter) = PyIterator::from_object(data) {
-        return extract_batch_iter(py, iter);
-    }
-
-    Err(PyValueError::new_err(
-        "Expected PyArrow Table, RecordBatch, or iterable of RecordBatches. \
-         For Polars DataFrames, use df.to_arrow() first.",
-    ))
-}
-
-/// Extract batches from a Python list/sequence of RecordBatches.
-fn extract_batch_list(py: Python<'_>, list: &Bound<'_, PyAny>) -> PyResult<Vec<RecordBatch>> {
-    let iter = PyIterator::from_object(list)?;
-    extract_batch_iter(py, iter)
-}
-
-/// Extract batches from a Python iterator of RecordBatches.
-fn extract_batch_iter(
-    _py: Python<'_>,
-    iter: Bound<'_, PyIterator>,
-) -> PyResult<Vec<RecordBatch>> {
-    let mut batches = Vec::new();
-    for item in iter {
-        let item = item?;
-        let batch = RecordBatch::from_pyarrow_bound(&item).map_err(|e| {
-            PyValueError::new_err(format!("Failed to convert RecordBatch: {}", e))
-        })?;
-        batches.push(batch);
-    }
-    Ok(batches)
 }
 
 /// Convert decode error to a user-friendly message

@@ -5,7 +5,10 @@ use std::fs::File;
 use std::path::Path;
 
 use anyhow::{anyhow, Context, Result};
-use arrow::array::{Array, BinaryArray, Float64Array, Int64Array, RecordBatch, StringArray, UInt64Array};
+use arrow::array::{
+    Array, BinaryArray, BinaryViewArray, Float64Array, Int64Array, LargeBinaryArray,
+    LargeStringArray, RecordBatch, StringArray, StringViewArray, UInt64Array,
+};
 use arrow::datatypes::{DataType, Field, Schema};
 use geo::{LineString, Point};
 use geozero::wkb;
@@ -135,50 +138,43 @@ fn process_batch(
         .column_by_name("endLon")
         .and_then(|c| c.as_any().downcast_ref::<Float64Array>());
 
-    let highway = batch
-        .column_by_name("highway")
-        .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+    // Highway can be String, LargeString, or StringView (Polars PyCapsule uses view types)
+    let highway_col = batch.column_by_name("highway");
+    let highway_string = highway_col.and_then(|c| c.as_any().downcast_ref::<StringArray>());
+    let highway_large = highway_col.and_then(|c| c.as_any().downcast_ref::<LargeStringArray>());
+    let highway_view = highway_col.and_then(|c| c.as_any().downcast_ref::<StringViewArray>());
 
     let lanes = batch
         .column_by_name("lanes")
         .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
 
-    let geometry = batch
-        .column_by_name("geometry")
-        .and_then(|c| c.as_any().downcast_ref::<BinaryArray>());
+    // Geometry can be Binary, LargeBinary, or BinaryView (Polars PyCapsule uses view types)
+    let geometry_col = batch.column_by_name("geometry");
+    let geometry_binary = geometry_col.and_then(|c| c.as_any().downcast_ref::<BinaryArray>());
+    let geometry_large = geometry_col.and_then(|c| c.as_any().downcast_ref::<LargeBinaryArray>());
+    let geometry_view = geometry_col.and_then(|c| c.as_any().downcast_ref::<BinaryViewArray>());
 
-    // All required columns must be present
-    let (
-        stable_edge_id,
-        start_vertex,
-        end_vertex,
-        start_lat,
-        start_lon,
-        end_lat,
-        end_lon,
-        highway,
-    ) = match (
-        stable_edge_id,
-        start_vertex,
-        end_vertex,
-        start_lat,
-        start_lon,
-        end_lat,
-        end_lon,
-        highway,
-    ) {
-        (
-            Some(eid),
-            Some(sv),
-            Some(ev),
-            Some(slat),
-            Some(slon),
-            Some(elat),
-            Some(elon),
-            Some(hw),
-        ) => (eid, sv, ev, slat, slon, elat, elon, hw),
-        _ => return Ok(()), // Skip batch if missing required columns
-    };
+    // All required columns must be present (highway can be String or LargeString)
+    let (stable_edge_id, start_vertex, end_vertex, start_lat, start_lon, end_lat, end_lon) =
+        match (
+            stable_edge_id,
+            start_vertex,
+            end_vertex,
+            start_lat,
+            start_lon,
+            end_lat,
+            end_lon,
+        ) {
+            (Some(eid), Some(sv), Some(ev), Some(slat), Some(slon), Some(elat), Some(elon)) => {
+                (eid, sv, ev, slat, slon, elat, elon)
+            }
+            _ => return Ok(()), // Skip batch if missing required columns
+        };
+
+    // Highway must be present (String, LargeString, or StringView)
+    if highway_string.is_none() && highway_large.is_none() && highway_view.is_none() {
+        return Ok(());
+    }
 
     for row in 0..batch.num_rows() {
         // Skip nulls
@@ -206,11 +202,15 @@ fn process_batch(
             network.add_node(Node { id: ev_id, coord });
         }
 
-        // Parse highway tag for FRC/FOW
-        let hw_tag = if highway.is_null(row) {
-            ""
+        // Parse highway tag for FRC/FOW (handle String, LargeString, and StringView)
+        let hw_tag: &str = if let Some(hw) = highway_string {
+            if hw.is_null(row) { "" } else { hw.value(row) }
+        } else if let Some(hw) = highway_large {
+            if hw.is_null(row) { "" } else { hw.value(row) }
+        } else if let Some(hw) = highway_view {
+            if hw.is_null(row) { "" } else { hw.value(row) }
         } else {
-            highway.value(row)
+            ""
         };
         let frc = Frc::from_osm_highway(hw_tag);
 
@@ -223,14 +223,25 @@ fn process_batch(
         });
         let fow = Fow::from_osm_tags(hw_tag, None, None, lane_count);
 
-        // Parse geometry
-        let geom: LineString<f64> = if let Some(geom_col) = geometry {
+        // Parse geometry (handle Binary, LargeBinary, and BinaryView)
+        let geom: LineString<f64> = if let Some(geom_col) = geometry_binary {
             if !geom_col.is_null(row) {
-                let wkb_bytes = geom_col.value(row);
-                parse_wkb_linestring(wkb_bytes).unwrap_or_else(|| {
-                    // Fallback to simple start->end line
-                    LineString::from(vec![(sv_lon, sv_lat), (ev_lon, ev_lat)])
-                })
+                parse_wkb_linestring(geom_col.value(row))
+                    .unwrap_or_else(|| LineString::from(vec![(sv_lon, sv_lat), (ev_lon, ev_lat)]))
+            } else {
+                LineString::from(vec![(sv_lon, sv_lat), (ev_lon, ev_lat)])
+            }
+        } else if let Some(geom_col) = geometry_large {
+            if !geom_col.is_null(row) {
+                parse_wkb_linestring(geom_col.value(row))
+                    .unwrap_or_else(|| LineString::from(vec![(sv_lon, sv_lat), (ev_lon, ev_lat)]))
+            } else {
+                LineString::from(vec![(sv_lon, sv_lat), (ev_lon, ev_lat)])
+            }
+        } else if let Some(geom_col) = geometry_view {
+            if !geom_col.is_null(row) {
+                parse_wkb_linestring(geom_col.value(row))
+                    .unwrap_or_else(|| LineString::from(vec![(sv_lon, sv_lat), (ev_lon, ev_lat)]))
             } else {
                 LineString::from(vec![(sv_lon, sv_lat), (ev_lon, ev_lat)])
             }
