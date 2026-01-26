@@ -118,12 +118,7 @@ where
 
     for batch_result in batches {
         let batch = batch_result?;
-        process_batch(
-            &batch,
-            &mut network,
-            &mut edge_envelopes,
-            &mut seen_nodes,
-        )?;
+        process_batch(&batch, &mut network, &mut edge_envelopes, &mut seen_nodes)?;
     }
 
     let spatial_index = SpatialIndex::new(edge_envelopes);
@@ -181,21 +176,20 @@ fn process_batch(
     let geometry_format = detect_geometry_format(batch);
 
     // All required columns must be present (highway can be String or LargeString)
-    let (stable_edge_id, start_vertex, end_vertex, start_lat, start_lon, end_lat, end_lon) =
-        match (
-            stable_edge_id,
-            start_vertex,
-            end_vertex,
-            start_lat,
-            start_lon,
-            end_lat,
-            end_lon,
-        ) {
-            (Some(eid), Some(sv), Some(ev), Some(slat), Some(slon), Some(elat), Some(elon)) => {
-                (eid, sv, ev, slat, slon, elat, elon)
-            }
-            _ => return Ok(()), // Skip batch if missing required columns
-        };
+    let (stable_edge_id, start_vertex, end_vertex, start_lat, start_lon, end_lat, end_lon) = match (
+        stable_edge_id,
+        start_vertex,
+        end_vertex,
+        start_lat,
+        start_lon,
+        end_lat,
+        end_lon,
+    ) {
+        (Some(eid), Some(sv), Some(ev), Some(slat), Some(slon), Some(elat), Some(elon)) => {
+            (eid, sv, ev, slat, slon, elat, elon)
+        }
+        _ => return Ok(()), // Skip batch if missing required columns
+    };
 
     // Highway must be present (String, LargeString, or StringView)
     if highway_string.is_none() && highway_large.is_none() && highway_view.is_none() {
@@ -230,11 +224,23 @@ fn process_batch(
 
         // Parse highway tag for FRC/FOW (handle String, LargeString, and StringView)
         let hw_tag: &str = if let Some(hw) = highway_string {
-            if hw.is_null(row) { "" } else { hw.value(row) }
+            if hw.is_null(row) {
+                ""
+            } else {
+                hw.value(row)
+            }
         } else if let Some(hw) = highway_large {
-            if hw.is_null(row) { "" } else { hw.value(row) }
+            if hw.is_null(row) {
+                ""
+            } else {
+                hw.value(row)
+            }
         } else if let Some(hw) = highway_view {
-            if hw.is_null(row) { "" } else { hw.value(row) }
+            if hw.is_null(row) {
+                ""
+            } else {
+                hw.value(row)
+            }
         } else {
             ""
         };
@@ -255,13 +261,25 @@ fn process_batch(
             GeometryFormat::Wkb(source) => {
                 let bytes = match source {
                     WkbSource::Binary(arr) => {
-                        if arr.is_null(row) { None } else { Some(arr.value(row)) }
+                        if arr.is_null(row) {
+                            None
+                        } else {
+                            Some(arr.value(row))
+                        }
                     }
                     WkbSource::LargeBinary(arr) => {
-                        if arr.is_null(row) { None } else { Some(arr.value(row)) }
+                        if arr.is_null(row) {
+                            None
+                        } else {
+                            Some(arr.value(row))
+                        }
                     }
                     WkbSource::BinaryView(arr) => {
-                        if arr.is_null(row) { None } else { Some(arr.value(row)) }
+                        if arr.is_null(row) {
+                            None
+                        } else {
+                            Some(arr.value(row))
+                        }
                     }
                 };
                 bytes
@@ -271,13 +289,25 @@ fn process_batch(
             GeometryFormat::Wkt(source) => {
                 let text = match source {
                     WktSource::String(arr) => {
-                        if arr.is_null(row) { None } else { Some(arr.value(row)) }
+                        if arr.is_null(row) {
+                            None
+                        } else {
+                            Some(arr.value(row))
+                        }
                     }
                     WktSource::LargeString(arr) => {
-                        if arr.is_null(row) { None } else { Some(arr.value(row)) }
+                        if arr.is_null(row) {
+                            None
+                        } else {
+                            Some(arr.value(row))
+                        }
                     }
                     WktSource::StringView(arr) => {
-                        if arr.is_null(row) { None } else { Some(arr.value(row)) }
+                        if arr.is_null(row) {
+                            None
+                        } else {
+                            Some(arr.value(row))
+                        }
                     }
                 };
                 text.and_then(parse_wkt_linestring).unwrap_or_else(fallback)
@@ -526,8 +556,10 @@ mod tests {
         let x_values: Vec<f64> = vec![0.0, 1.0, 2.0];
         let y_values: Vec<f64> = vec![0.0, 1.0, 2.0];
 
-        let x_array = Arc::new(arrow::array::Float64Array::from(x_values)) as arrow::array::ArrayRef;
-        let y_array = Arc::new(arrow::array::Float64Array::from(y_values)) as arrow::array::ArrayRef;
+        let x_array =
+            Arc::new(arrow::array::Float64Array::from(x_values)) as arrow::array::ArrayRef;
+        let y_array =
+            Arc::new(arrow::array::Float64Array::from(y_values)) as arrow::array::ArrayRef;
 
         let coord_struct = StructArray::new(coord_fields, vec![x_array, y_array], None);
 
@@ -545,9 +577,8 @@ mod tests {
         );
 
         // Convert to GeoArrow LineStringArray
-        let line_type =
-            LineStringType::new(Dimension::XY, Arc::new(Metadata::default()))
-                .with_coord_type(geoarrow_schema::CoordType::Separated);
+        let line_type = LineStringType::new(Dimension::XY, Arc::new(Metadata::default()))
+            .with_coord_type(geoarrow_schema::CoordType::Separated);
         let geoarrow_arr = LineStringArray::try_from((&list_array, line_type)).unwrap();
 
         // Test parsing
@@ -575,11 +606,7 @@ mod tests {
 
         let schema = Schema::new(vec![Field::new("geometry", DataType::Binary, true)]);
 
-        let batch = RecordBatch::try_new(
-            Arc::new(schema),
-            vec![Arc::new(geom_array)],
-        )
-        .unwrap();
+        let batch = RecordBatch::try_new(Arc::new(schema), vec![Arc::new(geom_array)]).unwrap();
 
         let format = detect_geometry_format(&batch);
         assert!(matches!(format, GeometryFormat::Wkb(WkbSource::Binary(_))));
@@ -595,11 +622,7 @@ mod tests {
 
         let schema = Schema::new(vec![Field::new("geometry", DataType::Utf8, true)]);
 
-        let batch = RecordBatch::try_new(
-            Arc::new(schema),
-            vec![Arc::new(geom_array)],
-        )
-        .unwrap();
+        let batch = RecordBatch::try_new(Arc::new(schema), vec![Arc::new(geom_array)]).unwrap();
 
         let format = detect_geometry_format(&batch);
         assert!(matches!(format, GeometryFormat::Wkt(WktSource::String(_))));
@@ -615,11 +638,7 @@ mod tests {
 
         let schema = Schema::new(vec![Field::new("other_column", DataType::Int64, true)]);
 
-        let batch = RecordBatch::try_new(
-            Arc::new(schema),
-            vec![Arc::new(array)],
-        )
-        .unwrap();
+        let batch = RecordBatch::try_new(Arc::new(schema), vec![Arc::new(array)]).unwrap();
 
         let format = detect_geometry_format(&batch);
         assert!(matches!(format, GeometryFormat::None));
