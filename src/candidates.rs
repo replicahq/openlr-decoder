@@ -2,7 +2,7 @@ use geo::Point;
 use petgraph::graph::EdgeIndex;
 
 use crate::graph::{Fow, Frc, RoadNetwork};
-use crate::spatial::{bearing_at_projection, bearing_difference, SpatialIndex};
+use crate::spatial::{bearing_at_end, bearing_at_projection, bearing_difference, SpatialIndex};
 
 /// A candidate edge for matching an LRP
 #[derive(Debug, Clone)]
@@ -154,8 +154,11 @@ pub fn find_start_candidates(
     find_candidates(coord, bearing, frc, fow, network, spatial, config)
 }
 
-/// Find candidates for an intermediate or end LRP
-/// These need to match the incoming bearing (edge end bearing)
+/// Find candidates for the LAST LRP per OpenLR spec section 12.1.
+/// The last LRP marks where the path ENDS, so we want edges that LEAD TO this point.
+/// Key differences from find_candidates():
+/// - Compare bearing against the edge's END bearing, not the projection point bearing
+/// - Prefer edges where the LRP projects near the END (high projection_fraction)
 pub fn find_end_candidates(
     coord: Point<f64>,
     bearing: f64,
@@ -165,10 +168,57 @@ pub fn find_end_candidates(
     spatial: &SpatialIndex,
     config: &CandidateConfig,
 ) -> Vec<Candidate> {
-    // For end points, we need to check the bearing at the end of edges
-    // leading into this point, which is slightly different logic
-    // For now, use the same function but this could be enhanced
-    find_candidates(coord, bearing, frc, fow, network, spatial, config)
+    // Find nearby edges
+    let nearby = spatial.find_within_radius(coord, config.search_radius_m);
+
+    let mut candidates: Vec<Candidate> = nearby
+        .into_iter()
+        .filter_map(|(env, distance_m)| {
+            let edge = network.edge(env.edge_idx)?;
+
+            // For last LRP: Compare bearing against the edge's END bearing
+            // This is the bearing of the last segment of the edge geometry
+            let edge_bearing = bearing_at_end(&env.geometry);
+            let bearing_diff = bearing_difference(bearing, edge_bearing);
+
+            // Check bearing tolerance (hard filter - bearing must be reasonably close)
+            if bearing_diff > config.max_bearing_diff {
+                return None;
+            }
+
+            // Check FRC compatibility (hard filter with tolerance)
+            let frc_diff = (edge.frc as i8 - frc as i8).unsigned_abs();
+            if frc_diff > config.frc_tolerance {
+                return None;
+            }
+
+            // FOW is a soft scoring factor, not a hard filter
+            let fow_score = edge.fow.substitution_score(fow);
+
+            // Compute projection fraction
+            let projection_fraction =
+                crate::spatial::project_point_to_line_fraction(coord, &env.geometry);
+
+            // Compute score (lower is better)
+            let score = compute_score(distance_m, bearing_diff, frc_diff, fow_score, config);
+
+            Some(Candidate {
+                edge_idx: env.edge_idx,
+                distance_m,
+                bearing_diff,
+                frc_diff,
+                fow_score,
+                score,
+                projection_fraction,
+            })
+        })
+        .collect();
+
+    // Sort by score and take top N
+    candidates.sort_by(|a, b| a.score.partial_cmp(&b.score).unwrap());
+    candidates.truncate(config.max_candidates);
+
+    candidates
 }
 
 #[cfg(test)]

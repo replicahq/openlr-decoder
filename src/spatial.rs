@@ -251,6 +251,27 @@ pub fn bearing_at_projection(point: Point<f64>, line: &LineString<f64>) -> f64 {
     ((bearing % 360.0) + 360.0) % 360.0
 }
 
+/// Get the bearing at the END of a line (the last segment's bearing)
+/// This is used for last LRP matching per OpenLR spec section 12.1
+/// Returns the bearing of the last segment (0-360 degrees)
+pub fn bearing_at_end(line: &LineString<f64>) -> f64 {
+    use geo::GeodesicBearing;
+
+    let coords: Vec<Coord<f64>> = line.coords().cloned().collect();
+    if coords.len() < 2 {
+        return 0.0;
+    }
+
+    // Get the last segment
+    let n = coords.len();
+    let p1 = Point::new(coords[n - 2].x, coords[n - 2].y);
+    let p2 = Point::new(coords[n - 1].x, coords[n - 1].y);
+
+    let bearing = p1.geodesic_bearing(p2);
+    // Normalize to 0-360
+    ((bearing % 360.0) + 360.0) % 360.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

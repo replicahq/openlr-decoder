@@ -6,7 +6,7 @@ use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::visit::EdgeRef;
 use thiserror::Error;
 
-use crate::candidates::{find_candidates, Candidate, CandidateConfig};
+use crate::candidates::{find_candidates, find_end_candidates, Candidate, CandidateConfig};
 use crate::graph::{Fow, Frc, RoadNetwork};
 use crate::spatial::SpatialIndex;
 
@@ -279,15 +279,32 @@ impl<'a> Decoder<'a> {
             let frc = Frc::from_u8(point.line.frc.value() as u8);
             let fow = Fow::from_u8(point.line.fow.value() as u8);
 
-            let candidates = find_candidates(
-                coord,
-                bearing,
-                frc,
-                fow,
-                self.network,
-                self.spatial,
-                &self.config.candidate_config,
-            );
+            // Per OpenLR spec section 12.1:
+            // - Non-last LRPs: use outgoing edges, compare bearing at start/projection
+            // - Last LRP: use incoming edges, compare bearing at end of edge
+            let candidates = if i == points.len() - 1 {
+                // Last LRP - marks where the path ENDS
+                find_end_candidates(
+                    coord,
+                    bearing,
+                    frc,
+                    fow,
+                    self.network,
+                    self.spatial,
+                    &self.config.candidate_config,
+                )
+            } else {
+                // Non-last LRPs - marks where path continues FROM
+                find_candidates(
+                    coord,
+                    bearing,
+                    frc,
+                    fow,
+                    self.network,
+                    self.spatial,
+                    &self.config.candidate_config,
+                )
+            };
 
             if candidates.is_empty() {
                 return Err(DecodeError::NoCandidates { index: i });
@@ -403,15 +420,32 @@ impl<'a> Decoder<'a> {
             let frc = Frc::from_u8(point.line.frc.value() as u8);
             let fow = Fow::from_u8(point.line.fow.value() as u8);
 
-            let candidates = find_candidates(
-                coord,
-                bearing,
-                frc,
-                fow,
-                self.network,
-                self.spatial,
-                &self.config.candidate_config,
-            );
+            // Per OpenLR spec section 12.1:
+            // - Non-last LRPs: use outgoing edges, compare bearing at start/projection
+            // - Last LRP: use incoming edges, compare bearing at end of edge
+            let candidates = if i == points.len() - 1 {
+                // Last LRP - marks where the path ENDS
+                find_end_candidates(
+                    coord,
+                    bearing,
+                    frc,
+                    fow,
+                    self.network,
+                    self.spatial,
+                    &self.config.candidate_config,
+                )
+            } else {
+                // Non-last LRPs - marks where path continues FROM
+                find_candidates(
+                    coord,
+                    bearing,
+                    frc,
+                    fow,
+                    self.network,
+                    self.spatial,
+                    &self.config.candidate_config,
+                )
+            };
 
             if candidates.is_empty() {
                 return Err(DecodeError::NoCandidates { index: i });
