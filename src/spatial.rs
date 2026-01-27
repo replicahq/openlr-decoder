@@ -1,9 +1,12 @@
-use geo::{Closest, HaversineClosestPoint, HaversineDistance};
-use geo::{Coord, LineString, Point};
+use geo::{Coord, HaversineDistance, LineString, Point};
 use petgraph::graph::EdgeIndex;
 use rstar::{RTree, RTreeObject, AABB};
 
-/// Envelope wrapper for an edge's geometry in the R-tree
+/// Envelope wrapper for an edge's bounding box in the R-tree.
+///
+/// This struct intentionally does NOT store the edge geometry to avoid
+/// duplicating it (the canonical copy lives in `Edge` in the graph).
+/// Precise distance calculations look up geometry via `network.edge()`.
 #[derive(Debug, Clone)]
 pub struct EdgeEnvelope {
     pub edge_idx: EdgeIndex,
@@ -11,33 +14,21 @@ pub struct EdgeEnvelope {
     pub min_y: f64,
     pub max_x: f64,
     pub max_y: f64,
-    /// First point of geometry (for quick access)
-    pub start_point: Point<f64>,
-    /// Full geometry reference for precise distance calculations
-    pub geometry: LineString<f64>,
 }
 
 impl EdgeEnvelope {
-    pub fn new(edge_idx: EdgeIndex, geometry: LineString<f64>) -> Self {
-        let coords: Vec<_> = geometry.coords().collect();
-
+    pub fn new(edge_idx: EdgeIndex, geometry: &LineString<f64>) -> Self {
         let mut min_x = f64::MAX;
         let mut min_y = f64::MAX;
         let mut max_x = f64::MIN;
         let mut max_y = f64::MIN;
 
-        for c in &coords {
+        for c in geometry.coords() {
             min_x = min_x.min(c.x);
             min_y = min_y.min(c.y);
             max_x = max_x.max(c.x);
             max_y = max_y.max(c.y);
         }
-
-        let start_point = if coords.is_empty() {
-            Point::new(0.0, 0.0)
-        } else {
-            Point::new(coords[0].x, coords[0].y)
-        };
 
         EdgeEnvelope {
             edge_idx,
@@ -45,23 +36,7 @@ impl EdgeEnvelope {
             min_y,
             max_x,
             max_y,
-            start_point,
-            geometry,
         }
-    }
-
-    /// Get the closest point on this edge to a query point
-    pub fn closest_point(&self, query: Point<f64>) -> Point<f64> {
-        match self.geometry.haversine_closest_point(&query) {
-            Closest::SinglePoint(p) | Closest::Intersection(p) => p,
-            Closest::Indeterminate => self.start_point,
-        }
-    }
-
-    /// Distance in meters from query point to closest point on edge
-    pub fn distance_to(&self, query: Point<f64>) -> f64 {
-        let closest = self.closest_point(query);
-        query.haversine_distance(&closest)
     }
 }
 
@@ -105,27 +80,6 @@ impl SpatialIndex {
         self.rtree
             .locate_in_envelope_intersecting(&search_box)
             .collect()
-    }
-
-    /// Find edges within radius, sorted by distance to query point
-    pub fn find_within_radius(
-        &self,
-        center: Point<f64>,
-        radius_m: f64,
-    ) -> Vec<(&EdgeEnvelope, f64)> {
-        let candidates = self.find_nearby(center, radius_m * 1.5); // Slight buffer for bbox approximation
-
-        let mut results: Vec<_> = candidates
-            .into_iter()
-            .map(|e| {
-                let dist = e.distance_to(center);
-                (e, dist)
-            })
-            .filter(|(_, dist)| *dist <= radius_m)
-            .collect();
-
-        results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-        results
     }
 
     pub fn len(&self) -> usize {
@@ -265,7 +219,7 @@ mod tests {
     #[test]
     fn test_edge_envelope() {
         let line = LineString::from(vec![(0.0, 0.0), (1.0, 1.0)]);
-        let env = EdgeEnvelope::new(EdgeIndex::new(0), line);
+        let env = EdgeEnvelope::new(EdgeIndex::new(0), &line);
 
         assert_eq!(env.min_x, 0.0);
         assert_eq!(env.max_x, 1.0);

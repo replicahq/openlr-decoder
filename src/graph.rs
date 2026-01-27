@@ -213,30 +213,55 @@ impl Edge {
 /// The road network graph
 pub struct RoadNetwork {
     pub graph: DiGraph<Node, Edge>,
-    pub node_id_to_index: HashMap<i64, NodeIndex>,
-    pub edge_id_to_index: HashMap<u64, EdgeIndex>,
+    pub node_id_to_index: Option<HashMap<i64, NodeIndex>>,
+    pub edge_id_to_index: Option<HashMap<u64, EdgeIndex>>,
 }
 
 impl RoadNetwork {
     pub fn new() -> Self {
         RoadNetwork {
             graph: DiGraph::new(),
-            node_id_to_index: HashMap::new(),
-            edge_id_to_index: HashMap::new(),
+            node_id_to_index: Some(HashMap::new()),
+            edge_id_to_index: Some(HashMap::new()),
         }
+    }
+
+    /// Create a new network with pre-allocated capacity.
+    pub fn new_with_capacity(node_hint: usize, edge_hint: usize) -> Self {
+        RoadNetwork {
+            graph: DiGraph::with_capacity(node_hint, edge_hint),
+            node_id_to_index: Some(HashMap::with_capacity(node_hint)),
+            edge_id_to_index: Some(HashMap::with_capacity(edge_hint)),
+        }
+    }
+
+    /// Drop the ID-to-index lookup maps to free memory.
+    ///
+    /// Call this after loading is complete and the maps are no longer needed.
+    /// After compaction, `add_node`, `get_or_add_node`, and `add_edge` will panic.
+    pub fn compact(&mut self) {
+        self.node_id_to_index = None;
+        self.edge_id_to_index = None;
     }
 
     /// Add a node to the network
     pub fn add_node(&mut self, node: Node) -> NodeIndex {
         let id = node.id;
         let idx = self.graph.add_node(node);
-        self.node_id_to_index.insert(id, idx);
+        self.node_id_to_index
+            .as_mut()
+            .expect("cannot add_node after compact()")
+            .insert(id, idx);
         idx
     }
 
     /// Get or create a node
     pub fn get_or_add_node(&mut self, id: i64, coord: Point<f64>) -> NodeIndex {
-        if let Some(&idx) = self.node_id_to_index.get(&id) {
+        let map = self
+            .node_id_to_index
+            .as_ref()
+            .expect("cannot get_or_add_node after compact()");
+        if let Some(&idx) = map.get(&id) {
             return idx;
         }
         self.add_node(Node { id, coord })
@@ -244,18 +269,19 @@ impl RoadNetwork {
 
     /// Add an edge to the network
     pub fn add_edge(&mut self, from_node: i64, to_node: i64, edge: Edge) -> EdgeIndex {
-        let from_idx = *self
+        let node_map = self
             .node_id_to_index
-            .get(&from_node)
-            .expect("from_node must exist");
-        let to_idx = *self
-            .node_id_to_index
-            .get(&to_node)
-            .expect("to_node must exist");
+            .as_ref()
+            .expect("cannot add_edge after compact()");
+        let from_idx = *node_map.get(&from_node).expect("from_node must exist");
+        let to_idx = *node_map.get(&to_node).expect("to_node must exist");
 
         let edge_id = edge.id;
         let idx = self.graph.add_edge(from_idx, to_idx, edge);
-        self.edge_id_to_index.insert(edge_id, idx);
+        self.edge_id_to_index
+            .as_mut()
+            .expect("cannot add_edge after compact()")
+            .insert(edge_id, idx);
         idx
     }
 

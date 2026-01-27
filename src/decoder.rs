@@ -900,8 +900,8 @@ mod tests {
             .add_edge(2, 2, 3, 150.0, Frc::Frc3, Fow::SingleCarriageway)
             .build();
 
-        let start = *network.node_id_to_index.get(&1).unwrap();
-        let goal = *network.node_id_to_index.get(&3).unwrap();
+        let start = *network.node_id_to_index.as_ref().unwrap().get(&1).unwrap();
+        let goal = *network.node_id_to_index.as_ref().unwrap().get(&3).unwrap();
         let goal_coord = network.node(goal).unwrap().coord;
 
         // Max cost of 500m should easily accommodate the 250m path
@@ -937,8 +937,8 @@ mod tests {
             .add_edge(2, 2, 3, 150.0, Frc::Frc3, Fow::SingleCarriageway)
             .build();
 
-        let start = *network.node_id_to_index.get(&1).unwrap();
-        let goal = *network.node_id_to_index.get(&3).unwrap();
+        let start = *network.node_id_to_index.as_ref().unwrap().get(&1).unwrap();
+        let goal = *network.node_id_to_index.as_ref().unwrap().get(&3).unwrap();
         let goal_coord = network.node(goal).unwrap().coord;
 
         // Max cost of 100m is less than the 250m path - should fail
@@ -965,8 +965,8 @@ mod tests {
             .add_edge(3, 3, 4, 50.0, Frc::Frc3, Fow::SingleCarriageway) // Matches Java edge 8 length
             .build();
 
-        let start = *network.node_id_to_index.get(&1).unwrap();
-        let goal = *network.node_id_to_index.get(&4).unwrap();
+        let start = *network.node_id_to_index.as_ref().unwrap().get(&1).unwrap();
+        let goal = *network.node_id_to_index.as_ref().unwrap().get(&4).unwrap();
         let goal_coord = network.node(goal).unwrap().coord;
 
         let result = bounded_astar(&network, start, goal, goal_coord, 1000.0, None);
@@ -1011,8 +1011,8 @@ mod tests {
             .add_edge(4, 3, 4, 150.0, Frc::Frc3, Fow::SingleCarriageway)
             .build();
 
-        let start = *network.node_id_to_index.get(&1).unwrap();
-        let goal = *network.node_id_to_index.get(&4).unwrap();
+        let start = *network.node_id_to_index.as_ref().unwrap().get(&1).unwrap();
+        let goal = *network.node_id_to_index.as_ref().unwrap().get(&4).unwrap();
         let goal_coord = network.node(goal).unwrap().coord;
 
         let result = bounded_astar(&network, start, goal, goal_coord, 500.0, None);
@@ -1029,7 +1029,7 @@ mod tests {
         assert_eq!(path.len(), 3, "Shortest path has 3 nodes");
 
         // Verify it went through node 2, not node 3
-        let node2_idx = *network.node_id_to_index.get(&2).unwrap();
+        let node2_idx = *network.node_id_to_index.as_ref().unwrap().get(&2).unwrap();
         assert!(
             path.contains(&node2_idx),
             "Path should go through node 2 (shorter route)"
@@ -1045,7 +1045,7 @@ mod tests {
             .add_edge(1, 1, 2, 100.0, Frc::Frc3, Fow::SingleCarriageway)
             .build();
 
-        let start = *network.node_id_to_index.get(&1).unwrap();
+        let start = *network.node_id_to_index.as_ref().unwrap().get(&1).unwrap();
         let goal = start; // Same node
         let goal_coord = network.node(goal).unwrap().coord;
 
@@ -1071,8 +1071,8 @@ mod tests {
             .add_edge(2, 3, 4, 100.0, Frc::Frc3, Fow::SingleCarriageway) // Disconnected from 1-2
             .build();
 
-        let start = *network.node_id_to_index.get(&1).unwrap();
-        let goal = *network.node_id_to_index.get(&4).unwrap(); // In different component
+        let start = *network.node_id_to_index.as_ref().unwrap().get(&1).unwrap();
+        let goal = *network.node_id_to_index.as_ref().unwrap().get(&4).unwrap(); // In different component
         let goal_coord = network.node(goal).unwrap().coord;
 
         let result = bounded_astar(&network, start, goal, goal_coord, 10000.0, None);
@@ -1112,8 +1112,8 @@ mod tests {
             .add_edge(4, 3, 4, 75.0, Frc::Frc5, Fow::SingleCarriageway)
             .build();
 
-        let start = *network.node_id_to_index.get(&1).unwrap();
-        let goal = *network.node_id_to_index.get(&4).unwrap();
+        let start = *network.node_id_to_index.as_ref().unwrap().get(&1).unwrap();
+        let goal = *network.node_id_to_index.as_ref().unwrap().get(&4).unwrap();
         let goal_coord = network.node(goal).unwrap().coord;
 
         // Without LFRCNP: should find shorter path via node 3 (150m)
@@ -1141,8 +1141,8 @@ mod tests {
         );
 
         // Verify path went through node 2 (high importance), not node 3 (low importance)
-        let node2_idx = *network.node_id_to_index.get(&2).unwrap();
-        let node3_idx = *network.node_id_to_index.get(&3).unwrap();
+        let node2_idx = *network.node_id_to_index.as_ref().unwrap().get(&2).unwrap();
+        let node3_idx = *network.node_id_to_index.as_ref().unwrap().get(&3).unwrap();
         assert!(path.contains(&node2_idx), "Path should go through node 2");
         assert!(
             !path.contains(&node3_idx),
@@ -1165,8 +1165,8 @@ mod tests {
             .add_edge(4, 3, 4, 75.0, Frc::Frc7, Fow::SingleCarriageway)
             .build();
 
-        let start = *network.node_id_to_index.get(&1).unwrap();
-        let goal = *network.node_id_to_index.get(&4).unwrap();
+        let start = *network.node_id_to_index.as_ref().unwrap().get(&1).unwrap();
+        let goal = *network.node_id_to_index.as_ref().unwrap().get(&4).unwrap();
         let goal_coord = network.node(goal).unwrap().coord;
 
         // With LFRCNP = FRC7, even the lowest importance roads should be allowed
@@ -1190,8 +1190,8 @@ mod tests {
             .add_edge(1, 1, 2, 100.0, Frc::Frc5, Fow::SingleCarriageway)
             .build();
 
-        let start = *network.node_id_to_index.get(&1).unwrap();
-        let goal = *network.node_id_to_index.get(&2).unwrap();
+        let start = *network.node_id_to_index.as_ref().unwrap().get(&1).unwrap();
+        let goal = *network.node_id_to_index.as_ref().unwrap().get(&2).unwrap();
         let goal_coord = network.node(goal).unwrap().coord;
 
         // With LFRCNP = FRC3, the FRC5 edge should be blocked, making goal unreachable

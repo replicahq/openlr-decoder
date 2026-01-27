@@ -88,9 +88,21 @@ pub fn road_network_schema() -> Schema {
 pub fn load_network_from_parquet(path: &Path) -> Result<(RoadNetwork, SpatialIndex)> {
     let file = File::open(path).context("Failed to open parquet file")?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+
+    // Read total row count from parquet metadata for pre-allocation
+    let edge_count_hint = builder
+        .metadata()
+        .file_metadata()
+        .num_rows()
+        .try_into()
+        .unwrap_or(0usize);
+
     let reader = builder.build()?;
 
-    build_network_from_batches(reader.map(|r| r.map_err(|e| anyhow!(e))))
+    build_network_from_batches_with_hint(
+        reader.map(|r| r.map_err(|e| anyhow!(e))),
+        edge_count_hint,
+    )
 }
 
 /// Build a road network from an iterator of Arrow RecordBatches.
@@ -110,18 +122,46 @@ pub fn build_network_from_batches<I>(batches: I) -> Result<(RoadNetwork, Spatial
 where
     I: Iterator<Item = Result<RecordBatch>>,
 {
-    let mut network = RoadNetwork::new();
-    let mut edge_envelopes: Vec<EdgeEnvelope> = Vec::new();
+    build_network_from_batches_with_hint(batches, 0)
+}
+
+/// Build a road network with pre-allocation hints for better memory efficiency.
+///
+/// `edge_count_hint` is used to pre-allocate vectors and hash maps.
+/// Pass 0 if the count is unknown.
+fn build_network_from_batches_with_hint<I>(
+    batches: I,
+    edge_count_hint: usize,
+) -> Result<(RoadNetwork, SpatialIndex)>
+where
+    I: Iterator<Item = Result<RecordBatch>>,
+{
+    // Estimate node count as ~edge count (road networks have roughly equal nodes and edges)
+    let node_hint = edge_count_hint;
+
+    let mut network = if edge_count_hint > 0 {
+        RoadNetwork::new_with_capacity(node_hint, edge_count_hint)
+    } else {
+        RoadNetwork::new()
+    };
+
+    let mut edge_envelopes: Vec<EdgeEnvelope> = Vec::with_capacity(edge_count_hint);
 
     // Track nodes we've seen to avoid duplicates
-    let mut seen_nodes: HashMap<i64, Point<f64>> = HashMap::new();
+    let mut seen_nodes: HashMap<i64, Point<f64>> = HashMap::with_capacity(node_hint);
 
     for batch_result in batches {
         let batch = batch_result?;
         process_batch(&batch, &mut network, &mut edge_envelopes, &mut seen_nodes)?;
     }
 
+    // Explicitly drop seen_nodes before R-tree bulk_load to reduce peak memory
+    drop(seen_nodes);
+
     let spatial_index = SpatialIndex::new(edge_envelopes);
+
+    // Drop the ID-to-index lookup maps; they are only needed during construction.
+    network.compact();
 
     Ok((network, spatial_index))
 }
@@ -322,12 +362,13 @@ fn process_batch(
             GeometryFormat::None => fallback(),
         };
 
-        // Create edge
-        let edge = Edge::new(edge_id, geom.clone(), frc, fow);
+        // Create edge (move geometry into graph, no clone)
+        let edge = Edge::new(edge_id, geom, frc, fow);
         let edge_idx = network.add_edge(sv_id, ev_id, edge);
 
-        // Add to spatial index
-        edge_envelopes.push(EdgeEnvelope::new(edge_idx, geom));
+        // Add to spatial index (borrow geometry from graph)
+        let edge_geom = &network.edge(edge_idx).unwrap().geometry;
+        edge_envelopes.push(EdgeEnvelope::new(edge_idx, edge_geom));
     }
 
     Ok(())

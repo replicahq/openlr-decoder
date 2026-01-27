@@ -165,7 +165,7 @@ fn build_spatial_index(network: &RoadNetwork) -> SpatialIndex {
         .edge_indices()
         .filter_map(|idx| {
             let edge = network.edge(idx)?;
-            Some(EdgeEnvelope::new(idx, edge.geometry.clone()))
+            Some(EdgeEnvelope::new(idx, &edge.geometry))
         })
         .collect();
 
@@ -354,7 +354,7 @@ impl<'a> TestDecoder<'a> {
         for middle_edges in edge_options {
             let middle_cost: f64 = middle_edges
                 .iter()
-                .filter_map(|&eid| self.network.edge_id_to_index.get(&eid))
+                .filter_map(|&eid| self.network.edge_id_to_index.as_ref().unwrap().get(&eid))
                 .filter_map(|&idx| self.network.edge(idx))
                 .map(|e| e.length_m)
                 .sum();

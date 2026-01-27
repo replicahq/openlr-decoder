@@ -171,8 +171,8 @@ impl TestNetworkBuilder {
                 (end_coord.1, end_coord.0),
             ]);
 
-            // Create edge - Edge::new will compute bearings
-            let mut edge = Edge::new(pending.id, geometry.clone(), pending.frc, pending.fow);
+            // Create edge - Edge::new will compute bearings (move geometry, no clone)
+            let mut edge = Edge::new(pending.id, geometry, pending.frc, pending.fow);
 
             // Override length if explicitly provided
             if let Some(length) = pending.length_m {
@@ -181,8 +181,9 @@ impl TestNetworkBuilder {
 
             let edge_idx = network.add_edge(pending.start_node, pending.end_node, edge);
 
-            // Create envelope for spatial index
-            envelopes.push(EdgeEnvelope::new(edge_idx, geometry));
+            // Create envelope for spatial index (borrow geometry from graph)
+            let edge_geom = &network.edge(edge_idx).unwrap().geometry;
+            envelopes.push(EdgeEnvelope::new(edge_idx, edge_geom));
         }
 
         let spatial = SpatialIndex::new(envelopes);
@@ -222,7 +223,7 @@ mod tests {
             .add_edge(100, 1, 2, 5000.0, Frc::Frc2, Fow::SingleCarriageway)
             .build();
 
-        let edge_idx = network.edge_id_to_index.get(&100).unwrap();
+        let edge_idx = network.edge_id_to_index.as_ref().unwrap().get(&100).unwrap();
         let edge = network.edge(*edge_idx).unwrap();
 
         assert_eq!(edge.id, 100);
@@ -242,7 +243,7 @@ mod tests {
             .add_edge_auto_length(100, 1, 2, Frc::Frc2, Fow::SingleCarriageway)
             .build();
 
-        let edge_idx = network.edge_id_to_index.get(&100).unwrap();
+        let edge_idx = network.edge_id_to_index.as_ref().unwrap().get(&100).unwrap();
         let edge = network.edge(*edge_idx).unwrap();
 
         // 1 degree of longitude at 52° lat is roughly 68km
@@ -259,7 +260,7 @@ mod tests {
 
         // Search near the edge
         let center = Point::new(13.0005, 52.0); // (lon, lat)
-        let nearby = spatial.find_within_radius(center, 500.0);
+        let nearby = spatial.find_nearby(center, 500.0);
 
         assert_eq!(nearby.len(), 1);
     }
