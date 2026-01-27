@@ -38,9 +38,9 @@ impl Default for CandidateConfig {
     fn default() -> Self {
         CandidateConfig {
             search_radius_m: 100.0,         // 100m search radius for spatial index query
-            max_bearing_diff: 30.0,         // ±30 degrees bearing tolerance
-            frc_tolerance: 2,               // Allow ±2 FRC classes
-            max_candidates: 10,             // Keep top 10 candidates
+            max_bearing_diff: 90.0, // ±90 degrees bearing tolerance (generous for cross-provider curving roads)
+            frc_tolerance: 2,       // Allow ±2 FRC classes
+            max_candidates: 10,     // Keep top 10 candidates
             max_candidate_distance_m: 35.0, // Reject candidates > 35m from LRP
             // Scoring weights for cross-provider decoding (lower score is better):
             // Distance heavily dominates - a spatially close match with wrong FRC/FOW
@@ -220,15 +220,15 @@ mod tests {
         // Test various bearing differences with zero distance/frc diff and perfect FOW
         let score_0deg = compute_score(0.0, 0.0, 0, 1.0, &config);
         let score_15deg = compute_score(0.0, 15.0, 0, 1.0, &config);
-        let score_30deg = compute_score(0.0, 30.0, 0, 1.0, &config);
+        let score_90deg = compute_score(0.0, 90.0, 0, 1.0, &config);
 
         // Scores should increase with bearing difference
         assert!(score_0deg < score_15deg);
-        assert!(score_15deg < score_30deg);
+        assert!(score_15deg < score_90deg);
 
-        // At max bearing diff (30°), bearing component should contribute
-        // bearing_weight * (30 / 30) = 0.2 * 1.0 = 0.2
-        assert!((score_30deg - 0.2).abs() < 0.001);
+        // At max bearing diff (90°), bearing component should contribute
+        // bearing_weight * (90 / 90) = 0.2 * 1.0 = 0.2
+        assert!((score_90deg - 0.2).abs() < 0.001);
     }
 
     #[test]
