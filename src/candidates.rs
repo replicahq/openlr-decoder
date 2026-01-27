@@ -37,10 +37,10 @@ pub struct CandidateConfig {
 impl Default for CandidateConfig {
     fn default() -> Self {
         CandidateConfig {
-            search_radius_m: 100.0, // 100m search radius for spatial index query
-            max_bearing_diff: 30.0, // ±30 degrees bearing tolerance
-            frc_tolerance: 3,       // Allow ±3 FRC classes (relaxed for cross-provider decoding)
-            max_candidates: 10,     // Keep top 10 candidates
+            search_radius_m: 100.0,         // 100m search radius for spatial index query
+            max_bearing_diff: 30.0,         // ±30 degrees bearing tolerance
+            frc_tolerance: 3, // Allow ±3 FRC classes (relaxed for cross-provider decoding)
+            max_candidates: 10, // Keep top 10 candidates
             max_candidate_distance_m: 35.0, // Reject candidates > 35m from LRP
             // Scoring weights for cross-provider decoding (lower score is better):
             // Distance heavily dominates - a spatially close match with wrong FRC/FOW
@@ -256,10 +256,10 @@ mod tests {
         let config = CandidateConfig::default();
 
         // Test various FOW scores with zero distance/bearing/frc diff
-        let score_perfect_fow = compute_score(0.0, 0.0, 0, 1.0, &config);   // exact match
-        let score_good_fow = compute_score(0.0, 0.0, 0, 0.75, &config);     // compatible
-        let score_partial_fow = compute_score(0.0, 0.0, 0, 0.5, &config);   // partially compatible
-        let score_bad_fow = compute_score(0.0, 0.0, 0, 0.0, &config);       // incompatible
+        let score_perfect_fow = compute_score(0.0, 0.0, 0, 1.0, &config); // exact match
+        let score_good_fow = compute_score(0.0, 0.0, 0, 0.75, &config); // compatible
+        let score_partial_fow = compute_score(0.0, 0.0, 0, 0.5, &config); // partially compatible
+        let score_bad_fow = compute_score(0.0, 0.0, 0, 0.0, &config); // incompatible
 
         // Scores should increase as FOW match gets worse
         assert!(score_perfect_fow < score_good_fow);

@@ -319,7 +319,10 @@ mod tests {
     fn test_fow_substitution_score() {
         // Exact match should be 1.0
         assert_eq!(Fow::Motorway.substitution_score(Fow::Motorway), 1.0);
-        assert_eq!(Fow::SingleCarriageway.substitution_score(Fow::SingleCarriageway), 1.0);
+        assert_eq!(
+            Fow::SingleCarriageway.substitution_score(Fow::SingleCarriageway),
+            1.0
+        );
 
         // Undefined should match anything at 0.5
         assert_eq!(Fow::Undefined.substitution_score(Fow::Motorway), 0.5);
@@ -328,11 +331,20 @@ mod tests {
         // Motorway and MultipleCarriageway should be compatible (0.75)
         // This is important for cross-provider decoding where freeways may
         // be encoded as MultipleCarriageway by some providers
-        assert_eq!(Fow::Motorway.substitution_score(Fow::MultipleCarriageway), 0.75);
-        assert_eq!(Fow::MultipleCarriageway.substitution_score(Fow::Motorway), 0.75);
+        assert_eq!(
+            Fow::Motorway.substitution_score(Fow::MultipleCarriageway),
+            0.75
+        );
+        assert_eq!(
+            Fow::MultipleCarriageway.substitution_score(Fow::Motorway),
+            0.75
+        );
 
         // Incompatible types should score 0.0
         assert_eq!(Fow::Roundabout.substitution_score(Fow::Motorway), 0.0);
-        assert_eq!(Fow::SlipRoad.substitution_score(Fow::SingleCarriageway), 0.0);
+        assert_eq!(
+            Fow::SlipRoad.substitution_score(Fow::SingleCarriageway),
+            0.0
+        );
     }
 }
