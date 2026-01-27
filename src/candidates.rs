@@ -49,8 +49,8 @@ impl Default for CandidateConfig {
             // FRC/FOW are nearly ignored since cross-provider mappings are unreliable.
             distance_weight: 10.0, // Dominant - closest road almost always wins
             bearing_weight: 0.2,   // Minor tiebreaker for parallel roads
-            frc_weight: 0.05,      // Negligible - FRC mappings unreliable across providers
-            fow_weight: 0.05,      // Negligible - FOW mappings unreliable across providers
+            frc_weight: 0.1,       // Small factor - FRC mappings unreliable across providers
+            fow_weight: 0.1,       // Small factor - FOW mappings unreliable across providers
         }
     }
 }
@@ -247,8 +247,8 @@ mod tests {
         assert!(score_frc2 < score_frc3);
 
         // At max FRC diff (3), FRC component should contribute
-        // frc_weight * (3 / 3) = 0.05 * 1.0 = 0.05
-        assert!((score_frc3 - 0.05).abs() < 0.001);
+        // frc_weight * (3 / 3) = 0.1 * 1.0 = 0.1
+        assert!((score_frc3 - 0.1).abs() < 0.001);
     }
 
     #[test]
@@ -267,20 +267,20 @@ mod tests {
         assert!(score_partial_fow < score_bad_fow);
 
         // At worst FOW (0.0), FOW component should contribute
-        // fow_weight * (1.0 - 0.0) = 0.05 * 1.0 = 0.05
-        assert!((score_bad_fow - 0.05).abs() < 0.001);
+        // fow_weight * (1.0 - 0.0) = 0.1 * 1.0 = 0.1
+        assert!((score_bad_fow - 0.1).abs() < 0.001);
     }
 
     #[test]
     fn test_compute_score_distance_dominates() {
         let config = CandidateConfig::default();
 
-        // Distance should dominate scoring (weight 10.0 vs 0.2, 0.05, 0.05)
+        // Distance should dominate scoring (weight 10.0 vs 0.2, 0.1, 0.1)
         // A closer edge with worse bearing/frc/fow should beat a farther edge with perfect attributes
         let close_bad = compute_score(10.0, 30.0, 3, 0.0, &config);
         let far_perfect = compute_score(50.0, 0.0, 0, 1.0, &config);
 
-        // close_bad = 10.0 * 0.1 + 0.2 * 1.0 + 0.05 * 1.0 + 0.05 * 1.0 = 1.0 + 0.2 + 0.05 + 0.05 = 1.3
+        // close_bad = 10.0 * 0.1 + 0.2 * 1.0 + 0.1 * 1.0 + 0.1 * 1.0 = 1.0 + 0.2 + 0.1 + 0.1 = 1.4
         // far_perfect = 10.0 * 0.5 + 0 + 0 + 0 = 5.0
         assert!(close_bad < far_perfect);
     }
