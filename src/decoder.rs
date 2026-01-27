@@ -43,12 +43,17 @@ impl Ord for AStarNode {
 }
 
 /// Bounded A* search that stops when path cost exceeds max_cost
+///
+/// The optional `max_frc` parameter implements LFRCNP (Lowest FRC to Next Point) filtering
+/// per OpenLR spec Section 12.1 Step 5. When provided, the search will only traverse edges
+/// with FRC <= max_frc (lower FRC = higher road importance).
 fn bounded_astar(
     network: &RoadNetwork,
     start: NodeIndex,
     goal: NodeIndex,
     goal_coord: Point<f64>,
     max_cost: f64,
+    max_frc: Option<Frc>,
 ) -> Option<(f64, Vec<NodeIndex>)> {
     let mut open_set = BinaryHeap::new();
     let mut g_scores: HashMap<NodeIndex, f64> = HashMap::new();
@@ -90,6 +95,14 @@ fn bounded_astar(
 
         // Explore neighbors
         for edge in network.graph.edges(current.node) {
+            // LFRCNP filtering: skip edges with FRC higher (less important) than allowed
+            // Per OpenLR spec, if LFRCNP = FRC3, only traverse edges with FRC 0, 1, 2, or 3
+            if let Some(max) = max_frc {
+                if edge.weight().frc > max {
+                    continue;
+                }
+            }
+
             let neighbor = edge.target();
             let edge_cost = edge.weight().length_m;
             let tentative_g = current.g_score + edge_cost;
@@ -332,11 +345,18 @@ impl<'a> Decoder<'a> {
                 .map(|p| p.dnp.meters())
                 .unwrap_or(0.0);
 
+            // Extract LFRCNP (Lowest FRC to Next Point) for path filtering
+            let lfrcnp = points[i]
+                .path
+                .as_ref()
+                .map(|p| Frc::from_u8(p.lfrcnp.value() as u8));
+
             let path_result = self.find_best_path(
                 &all_candidates[i],
                 &all_candidates[i + 1],
                 expected_distance,
                 i,
+                lfrcnp,
             )?;
 
             // Add the actual traversed length (accounts for partial edge traversals)
@@ -445,8 +465,19 @@ impl<'a> Decoder<'a> {
             .map(|p| p.dnp.meters())
             .unwrap_or(0.0);
 
-        let path_result =
-            self.find_best_path(&all_candidates[0], &all_candidates[1], expected_distance, 0)?;
+        // Extract LFRCNP (Lowest FRC to Next Point) for path filtering
+        let lfrcnp = points[0]
+            .path
+            .as_ref()
+            .map(|p| Frc::from_u8(p.lfrcnp.value() as u8));
+
+        let path_result = self.find_best_path(
+            &all_candidates[0],
+            &all_candidates[1],
+            expected_distance,
+            0,
+            lfrcnp,
+        )?;
 
         // Find the primary edge (the one with maximum coverage)
         let (primary_edge_idx, primary_coverage) = path_result
@@ -561,12 +592,18 @@ impl<'a> Decoder<'a> {
 
     /// Find the best path between candidate sets
     /// Returns PathResult with edges, coverages, and total length
+    ///
+    /// The optional `lfrcnp` parameter specifies the Lowest FRC to Next Point constraint.
+    /// When provided, the A* search will only traverse edges with FRC <= lfrcnp.
+    /// For cross-provider decoding (HERE→OSM), we add +1 tolerance to account for
+    /// FRC mapping differences between map providers.
     fn find_best_path(
         &self,
         start_candidates: &[Candidate],
         end_candidates: &[Candidate],
         expected_distance: f64,
         lrp_index: usize,
+        lfrcnp: Option<Frc>,
     ) -> Result<PathResult, DecodeError> {
         // Compute distance bounds using both relative and absolute tolerance
         // For short segments, absolute tolerance dominates; for long segments, relative dominates
@@ -708,12 +745,26 @@ impl<'a> Decoder<'a> {
                 continue;
             }
 
+            // Apply LFRCNP constraint with +1 tolerance for cross-provider decoding
+            // This accounts for FRC mapping differences between HERE and OSM
+            let max_frc = lfrcnp.map(|frc| {
+                // Add 1 level of tolerance (e.g., LFRCNP=FRC3 allows up to FRC4)
+                Frc::from_u8((frc as u8).saturating_add(1))
+            });
+
             // Run bounded A* for the middle portion (between edges)
             let (middle_cost, path_nodes) = if start_node == end_node {
                 // Start and end edges share a node - no middle path needed
                 (0.0, vec![start_node])
             } else {
-                match bounded_astar(self.network, start_node, end_node, end_coord, middle_max) {
+                match bounded_astar(
+                    self.network,
+                    start_node,
+                    end_node,
+                    end_coord,
+                    middle_max,
+                    max_frc,
+                ) {
                     Some(result) => result,
                     None => continue,
                 }
@@ -854,7 +905,7 @@ mod tests {
         let goal_coord = network.node(goal).unwrap().coord;
 
         // Max cost of 500m should easily accommodate the 250m path
-        let result = bounded_astar(&network, start, goal, goal_coord, 500.0);
+        let result = bounded_astar(&network, start, goal, goal_coord, 500.0, None);
 
         assert!(result.is_some(), "Should find a valid path within max_cost");
 
@@ -892,7 +943,7 @@ mod tests {
 
         // Max cost of 100m is less than the 250m path - should fail
         // (This mirrors Java's NO_ROUTE_FOUND_MAX_DISTANCE = 100)
-        let result = bounded_astar(&network, start, goal, goal_coord, 100.0);
+        let result = bounded_astar(&network, start, goal, goal_coord, 100.0, None);
 
         assert!(
             result.is_none(),
@@ -918,7 +969,7 @@ mod tests {
         let goal = *network.node_id_to_index.get(&4).unwrap();
         let goal_coord = network.node(goal).unwrap().coord;
 
-        let result = bounded_astar(&network, start, goal, goal_coord, 1000.0);
+        let result = bounded_astar(&network, start, goal, goal_coord, 1000.0, None);
         assert!(result.is_some());
 
         let (cost, path) = result.unwrap();
@@ -964,7 +1015,7 @@ mod tests {
         let goal = *network.node_id_to_index.get(&4).unwrap();
         let goal_coord = network.node(goal).unwrap().coord;
 
-        let result = bounded_astar(&network, start, goal, goal_coord, 500.0);
+        let result = bounded_astar(&network, start, goal, goal_coord, 500.0, None);
         assert!(result.is_some());
 
         let (cost, path) = result.unwrap();
@@ -998,7 +1049,7 @@ mod tests {
         let goal = start; // Same node
         let goal_coord = network.node(goal).unwrap().coord;
 
-        let result = bounded_astar(&network, start, goal, goal_coord, 100.0);
+        let result = bounded_astar(&network, start, goal, goal_coord, 100.0, None);
         assert!(result.is_some());
 
         let (cost, path) = result.unwrap();
@@ -1024,11 +1075,137 @@ mod tests {
         let goal = *network.node_id_to_index.get(&4).unwrap(); // In different component
         let goal_coord = network.node(goal).unwrap().coord;
 
-        let result = bounded_astar(&network, start, goal, goal_coord, 10000.0);
+        let result = bounded_astar(&network, start, goal, goal_coord, 10000.0, None);
 
         assert!(
             result.is_none(),
             "Should return None for disconnected nodes"
+        );
+    }
+
+    // =========================================================================
+    // LFRCNP (Lowest FRC to Next Point) Filtering Tests
+    // =========================================================================
+    //
+    // Per OpenLR spec Section 12.1 Step 5, path search should only use edges
+    // with FRC <= LFRCNP. These tests verify that filtering works correctly.
+
+    /// Test that LFRCNP filtering blocks paths through low-importance roads
+    /// When LFRCNP = FRC2, paths should not traverse FRC3+ edges
+    #[test]
+    fn test_bounded_astar_lfrcnp_blocks_low_importance_roads() {
+        // Build a diamond network where:
+        // - Upper path (via node 2): FRC1 edges (high importance) - 200m total
+        // - Lower path (via node 3): FRC5 edges (low importance) - 150m total (shorter!)
+        //
+        // With LFRCNP = FRC2, only the upper path should be usable
+        let (network, _) = TestNetworkBuilder::new()
+            .add_node(1, 0.0, 0.0)
+            .add_node(2, 0.001, 0.001) // Upper path node
+            .add_node(3, -0.001, 0.001) // Lower path node
+            .add_node(4, 0.0, 0.002)
+            // Upper path: FRC1 (major routes) - longer but high importance
+            .add_edge(1, 1, 2, 100.0, Frc::Frc1, Fow::SingleCarriageway)
+            .add_edge(2, 2, 4, 100.0, Frc::Frc1, Fow::SingleCarriageway)
+            // Lower path: FRC5 (local roads) - shorter but low importance
+            .add_edge(3, 1, 3, 75.0, Frc::Frc5, Fow::SingleCarriageway)
+            .add_edge(4, 3, 4, 75.0, Frc::Frc5, Fow::SingleCarriageway)
+            .build();
+
+        let start = *network.node_id_to_index.get(&1).unwrap();
+        let goal = *network.node_id_to_index.get(&4).unwrap();
+        let goal_coord = network.node(goal).unwrap().coord;
+
+        // Without LFRCNP: should find shorter path via node 3 (150m)
+        let result_no_filter = bounded_astar(&network, start, goal, goal_coord, 500.0, None);
+        assert!(result_no_filter.is_some());
+        let (cost_no_filter, _) = result_no_filter.unwrap();
+        assert!(
+            (cost_no_filter - 150.0).abs() < 1.0,
+            "Without LFRCNP, should find shorter 150m path, got {}m",
+            cost_no_filter
+        );
+
+        // With LFRCNP = FRC2: should find path via node 2 (200m), avoiding FRC5 roads
+        let result_filtered =
+            bounded_astar(&network, start, goal, goal_coord, 500.0, Some(Frc::Frc2));
+        assert!(
+            result_filtered.is_some(),
+            "Should find path via high-importance roads"
+        );
+        let (cost_filtered, path) = result_filtered.unwrap();
+        assert!(
+            (cost_filtered - 200.0).abs() < 1.0,
+            "With LFRCNP=FRC2, should find 200m path via FRC1 roads, got {}m",
+            cost_filtered
+        );
+
+        // Verify path went through node 2 (high importance), not node 3 (low importance)
+        let node2_idx = *network.node_id_to_index.get(&2).unwrap();
+        let node3_idx = *network.node_id_to_index.get(&3).unwrap();
+        assert!(path.contains(&node2_idx), "Path should go through node 2");
+        assert!(
+            !path.contains(&node3_idx),
+            "Path should NOT go through node 3"
+        );
+    }
+
+    /// Test that LFRCNP = FRC7 allows all roads (effectively no filtering)
+    #[test]
+    fn test_bounded_astar_lfrcnp_frc7_allows_all() {
+        // Same diamond network as above
+        let (network, _) = TestNetworkBuilder::new()
+            .add_node(1, 0.0, 0.0)
+            .add_node(2, 0.001, 0.001)
+            .add_node(3, -0.001, 0.001)
+            .add_node(4, 0.0, 0.002)
+            .add_edge(1, 1, 2, 100.0, Frc::Frc1, Fow::SingleCarriageway)
+            .add_edge(2, 2, 4, 100.0, Frc::Frc1, Fow::SingleCarriageway)
+            .add_edge(3, 1, 3, 75.0, Frc::Frc7, Fow::SingleCarriageway) // Even FRC7 (lowest)
+            .add_edge(4, 3, 4, 75.0, Frc::Frc7, Fow::SingleCarriageway)
+            .build();
+
+        let start = *network.node_id_to_index.get(&1).unwrap();
+        let goal = *network.node_id_to_index.get(&4).unwrap();
+        let goal_coord = network.node(goal).unwrap().coord;
+
+        // With LFRCNP = FRC7, even the lowest importance roads should be allowed
+        let result = bounded_astar(&network, start, goal, goal_coord, 500.0, Some(Frc::Frc7));
+        assert!(result.is_some());
+        let (cost, _) = result.unwrap();
+        assert!(
+            (cost - 150.0).abs() < 1.0,
+            "LFRCNP=FRC7 should allow FRC7 roads, finding 150m path, got {}m",
+            cost
+        );
+    }
+
+    /// Test that LFRCNP filtering can make a path unreachable
+    #[test]
+    fn test_bounded_astar_lfrcnp_no_valid_path() {
+        // Network where only path uses FRC5 roads
+        let (network, _) = TestNetworkBuilder::new()
+            .add_node(1, 0.0, 0.0)
+            .add_node(2, 0.0, 0.001)
+            .add_edge(1, 1, 2, 100.0, Frc::Frc5, Fow::SingleCarriageway)
+            .build();
+
+        let start = *network.node_id_to_index.get(&1).unwrap();
+        let goal = *network.node_id_to_index.get(&2).unwrap();
+        let goal_coord = network.node(goal).unwrap().coord;
+
+        // With LFRCNP = FRC3, the FRC5 edge should be blocked, making goal unreachable
+        let result = bounded_astar(&network, start, goal, goal_coord, 500.0, Some(Frc::Frc3));
+        assert!(
+            result.is_none(),
+            "With LFRCNP=FRC3, path through FRC5 road should be blocked"
+        );
+
+        // But without filtering, path should exist
+        let result_unfiltered = bounded_astar(&network, start, goal, goal_coord, 500.0, None);
+        assert!(
+            result_unfiltered.is_some(),
+            "Without LFRCNP, path should exist"
         );
     }
 }
