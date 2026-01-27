@@ -458,7 +458,7 @@ mod tests {
     #[test]
     fn test_frc_highway_mapping() {
         assert_eq!(Frc::from_osm_highway("motorway"), Frc::Frc0);
-        assert_eq!(Frc::from_osm_highway("residential"), Frc::Frc5);
+        assert_eq!(Frc::from_osm_highway("residential"), Frc::Frc4);
     }
 
     #[test]

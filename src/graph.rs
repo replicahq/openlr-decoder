@@ -4,20 +4,22 @@ use petgraph::visit::EdgeRef;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Functional Road Class (OpenLR spec)
-/// FRC0 = Main road (motorway)
-/// FRC7 = Other (lowest importance)
+/// Functional Road Class — aligned with HERE's 5-level Functional Class (FC1–FC5).
+///
+/// HERE only uses FC1–FC5, which map to FRC0–FRC4. HERE-encoded OpenLR codes
+/// will never contain FRC5, FRC6, or FRC7. Those values exist in the OpenLR
+/// binary spec (3 bits = 0–7) but are unused by HERE.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum Frc {
-    Frc0 = 0, // Main road (motorway, freeway)
-    Frc1 = 1, // First class road (major routes)
-    Frc2 = 2, // Second class road (regional routes)
-    Frc3 = 3, // Third class road (local connecting roads)
-    Frc4 = 4, // Fourth class road (local roads of high importance)
-    Frc5 = 5, // Fifth class road (local roads)
-    Frc6 = 6, // Sixth class road (local roads of low importance)
-    Frc7 = 7, // Other (parking, service roads, etc.)
+    Frc0 = 0, // HERE FC1: Major highways / interstates (highest importance)
+    Frc1 = 1, // HERE FC2: Primary routes between / through cities
+    Frc2 = 2, // HERE FC3: Secondary routes between minor cities / towns
+    Frc3 = 3, // HERE FC4: Local connecting routes between villages
+    Frc4 = 4, // HERE FC5: Local / neighborhood roads (lowest importance)
+    Frc5 = 5, // Not used by HERE
+    Frc6 = 6, // Not used by HERE
+    Frc7 = 7, // Not used by HERE
 }
 
 impl Frc {
@@ -34,26 +36,27 @@ impl Frc {
         }
     }
 
-    /// Map OSM highway tag to FRC (aligned with HERE map classification)
-    /// HERE uses importance-based FRC rather than strict road type hierarchy
-    /// HERE classifies slip roads (ramps) separately from main roads
+    /// Map OSM highway tag to HERE-equivalent FRC.
+    ///
+    /// HERE uses 5 functional classes (FC1–FC5) mapped to FRC0–FRC4.
+    /// All navigable OSM roads must map into this range so they can match
+    /// HERE-encoded OpenLR location reference points.
     pub fn from_osm_highway(highway: &str) -> Self {
         match highway {
+            // FC1 → FRC0: Major highways, interstates
             "motorway" => Frc::Frc0,
+            // FC2 → FRC1: Primary routes between/through cities
             "trunk" => Frc::Frc1,
+            // FC3 → FRC2: Secondary routes between minor cities/towns
             "primary" => Frc::Frc2,
+            // FC4 → FRC3: Local connecting routes
             "secondary" => Frc::Frc3,
-            // HERE classifies slip roads/ramps as FRC 3-4 (connecting roads)
-            // regardless of the main road they serve
             "motorway_link" | "trunk_link" | "primary_link" => Frc::Frc3,
-            // HERE classifies service roads and unclassified roads as FRC 4
-            // (unclassified = minor public roads, typically local connections)
-            "tertiary" | "secondary_link" | "tertiary_link" | "service" | "unclassified" => {
-                Frc::Frc4
-            }
-            // Track roads and residential - minor local roads
-            "residential" | "track" => Frc::Frc5,
-            "living_street" => Frc::Frc6,
+            // FC5 → FRC4: Local / neighborhood roads (lowest in HERE's hierarchy)
+            "tertiary" | "secondary_link" | "tertiary_link" | "unclassified" | "residential"
+            | "living_street" | "service" | "track" => Frc::Frc4,
+            // Not in HERE's network — use FRC7 so these edges are unlikely to
+            // match any HERE-encoded LRP (outside ±2 tolerance from FRC0–4)
             _ => Frc::Frc7,
         }
     }
@@ -303,9 +306,17 @@ mod tests {
     #[test]
     fn test_frc_from_osm() {
         assert_eq!(Frc::from_osm_highway("motorway"), Frc::Frc0);
+        assert_eq!(Frc::from_osm_highway("trunk"), Frc::Frc1);
         assert_eq!(Frc::from_osm_highway("primary"), Frc::Frc2);
+        assert_eq!(Frc::from_osm_highway("secondary"), Frc::Frc3);
+        assert_eq!(Frc::from_osm_highway("motorway_link"), Frc::Frc3);
+        assert_eq!(Frc::from_osm_highway("tertiary"), Frc::Frc4);
         assert_eq!(Frc::from_osm_highway("unclassified"), Frc::Frc4);
-        assert_eq!(Frc::from_osm_highway("residential"), Frc::Frc5);
+        assert_eq!(Frc::from_osm_highway("residential"), Frc::Frc4);
+        assert_eq!(Frc::from_osm_highway("living_street"), Frc::Frc4);
+        assert_eq!(Frc::from_osm_highway("service"), Frc::Frc4);
+        assert_eq!(Frc::from_osm_highway("track"), Frc::Frc4);
+        assert_eq!(Frc::from_osm_highway("cycleway"), Frc::Frc7);
     }
 
     #[test]
