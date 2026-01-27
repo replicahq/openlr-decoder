@@ -372,9 +372,9 @@ impl<'a> Decoder<'a> {
             .map(|e| e.id)
             .unwrap_or(0);
 
-        // Extract offsets
-        let positive_offset_m = line.offsets.pos.range();
-        let negative_offset_m = line.offsets.neg.range();
+        // Extract offsets - convert from fractions (0.0-1.0) to meters
+        let positive_offset_m = line.offsets.pos.range() * total_length;
+        let negative_offset_m = line.offsets.neg.range() * total_length;
 
         Ok(DecodedPath {
             edge_ids: self.edge_indices_to_ids(&full_path),
@@ -471,7 +471,8 @@ impl<'a> Decoder<'a> {
             .map(|e| e.id)
             .unwrap_or(0);
 
-        let positive_offset_m = pal.offset.range();
+        // Convert offset from fraction (0.0-1.0) to meters
+        let positive_offset_m = pal.offset.range() * path_result.total_length;
 
         Ok(DecodedPath {
             edge_ids: self.edge_indices_to_ids(&path_result.edges),
