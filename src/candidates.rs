@@ -38,9 +38,9 @@ impl Default for CandidateConfig {
     fn default() -> Self {
         CandidateConfig {
             search_radius_m: 100.0,         // 100m search radius for spatial index query
-            max_bearing_diff: 90.0,         // ±90 degrees bearing tolerance (generous for cross-provider curving roads)
-            frc_tolerance: 2,               // Allow ±2 FRC classes
-            max_candidates: 10,             // Keep top 10 candidates
+            max_bearing_diff: 90.0, // ±90 degrees bearing tolerance (generous for cross-provider curving roads)
+            frc_tolerance: 2,       // Allow ±2 FRC classes
+            max_candidates: 10,     // Keep top 10 candidates
             max_candidate_distance_m: 35.0, // Reject candidates > 35m from LRP
             // Scoring weights for cross-provider decoding (lower score is better):
             // Distance heavily dominates - a spatially close match with wrong FRC/FOW
