@@ -120,27 +120,32 @@ impl Fow {
         }
     }
 
-    /// Check FOW compatibility (OpenLR allows some flexibility)
-    /// For cross-provider decoding, FOW is treated as a hint rather than strict filter
-    pub fn is_compatible(&self, other: Fow) -> bool {
-        // Undefined matches anything
-        if *self == Fow::Undefined || other == Fow::Undefined {
-            return true;
-        }
-        // Exact match
-        if *self == other {
-            return true;
-        }
-        // For cross-provider decoding, allow flexibility between similar FOW types:
-        // - Single/Multiple/TrafficSquare/Other are common road types
-        // - Only Motorway, Roundabout, and SlipRoad should be strictly matched
-        let is_generic_road = |f: &Fow| {
-            matches!(
-                f,
-                Fow::SingleCarriageway | Fow::MultipleCarriageway | Fow::TrafficSquare | Fow::Other
-            )
-        };
-        is_generic_road(self) && is_generic_road(&other)
+    /// Get FOW substitution score for cross-provider decoding.
+    /// Returns a score from 0.0 (incompatible) to 1.0 (exact match).
+    /// Based on the official TomTom OpenLR reference implementation.
+    ///
+    /// The matrix encodes how well `other` (from the LRP) can be substituted
+    /// by `self` (from the map edge).
+    pub fn substitution_score(&self, other: Fow) -> f64 {
+        // FOW substitution score matrix from official TomTom OpenLR implementation
+        // Row = LRP's FOW (wanted), Column = Edge's FOW (actual/self)
+        // Score 1.0 = exact match, 0.0 = incompatible, 0.5-0.75 = partial match
+        #[rustfmt::skip]
+        const FOW_SCORE_MATRIX: [[f64; 8]; 8] = [
+            //       Und   Mwy   Mlt   Sgl   Rnd   Tsq   Slp   Oth
+            /* Und */ [0.50, 0.50, 0.50, 0.50, 0.50, 0.50, 0.50, 0.50],
+            /* Mwy */ [0.50, 1.00, 0.75, 0.00, 0.00, 0.00, 0.00, 0.00],
+            /* Mlt */ [0.50, 0.75, 1.00, 0.75, 0.50, 0.00, 0.00, 0.00],
+            /* Sgl */ [0.50, 0.00, 0.75, 1.00, 0.50, 0.50, 0.00, 0.00],
+            /* Rnd */ [0.50, 0.00, 0.50, 0.50, 1.00, 0.50, 0.00, 0.00],
+            /* Tsq */ [0.50, 0.00, 0.00, 0.50, 0.50, 1.00, 0.00, 0.00],
+            /* Slp */ [0.50, 0.00, 0.00, 0.00, 0.00, 0.00, 1.00, 0.00],
+            /* Oth */ [0.50, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 1.00],
+        ];
+
+        let wanted_idx = other as usize;
+        let actual_idx = *self as usize;
+        FOW_SCORE_MATRIX[wanted_idx][actual_idx]
     }
 }
 
@@ -311,9 +316,35 @@ mod tests {
     }
 
     #[test]
-    fn test_fow_compatibility() {
-        assert!(Fow::SingleCarriageway.is_compatible(Fow::MultipleCarriageway));
-        assert!(Fow::Undefined.is_compatible(Fow::Motorway));
-        assert!(!Fow::Roundabout.is_compatible(Fow::Motorway));
+    fn test_fow_substitution_score() {
+        // Exact match should be 1.0
+        assert_eq!(Fow::Motorway.substitution_score(Fow::Motorway), 1.0);
+        assert_eq!(
+            Fow::SingleCarriageway.substitution_score(Fow::SingleCarriageway),
+            1.0
+        );
+
+        // Undefined should match anything at 0.5
+        assert_eq!(Fow::Undefined.substitution_score(Fow::Motorway), 0.5);
+        assert_eq!(Fow::Motorway.substitution_score(Fow::Undefined), 0.5);
+
+        // Motorway and MultipleCarriageway should be compatible (0.75)
+        // This is important for cross-provider decoding where freeways may
+        // be encoded as MultipleCarriageway by some providers
+        assert_eq!(
+            Fow::Motorway.substitution_score(Fow::MultipleCarriageway),
+            0.75
+        );
+        assert_eq!(
+            Fow::MultipleCarriageway.substitution_score(Fow::Motorway),
+            0.75
+        );
+
+        // Incompatible types should score 0.0
+        assert_eq!(Fow::Roundabout.substitution_score(Fow::Motorway), 0.0);
+        assert_eq!(
+            Fow::SlipRoad.substitution_score(Fow::SingleCarriageway),
+            0.0
+        );
     }
 }

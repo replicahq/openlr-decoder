@@ -11,7 +11,7 @@ pub struct Candidate {
     pub distance_m: f64,          // Distance from LRP to edge
     pub bearing_diff: f64,        // Bearing difference in degrees
     pub frc_diff: u8,             // FRC difference (0 = exact match)
-    pub fow_compatible: bool,     // FOW compatibility
+    pub fow_score: f64,           // FOW substitution score (0.0 = incompatible, 1.0 = exact match)
     pub score: f64,               // Combined score (lower is better)
     pub projection_fraction: f64, // Where on the edge the LRP projects (0-1)
 }
@@ -23,26 +23,34 @@ pub struct CandidateConfig {
     pub max_bearing_diff: f64,
     pub frc_tolerance: u8,
     pub max_candidates: usize,
-    // Scoring weights
+    /// Maximum distance from LRP to edge for a valid candidate (meters).
+    /// Candidates beyond this distance are rejected even if they pass other filters.
+    /// This prevents matching to far-away roads when the correct road is missing.
+    pub max_candidate_distance_m: f64,
+    // Scoring weights (lower score is better)
     pub distance_weight: f64,
     pub bearing_weight: f64,
     pub frc_weight: f64,
+    pub fow_weight: f64,
 }
 
 impl Default for CandidateConfig {
     fn default() -> Self {
         CandidateConfig {
-            search_radius_m: 100.0, // 100m search radius
-            max_bearing_diff: 30.0, // ±30 degrees bearing tolerance
-            frc_tolerance: 2,       // Allow ±2 FRC classes
-            max_candidates: 10,     // Keep top 10 candidates
-            // Scoring weights for cross-provider decoding (HERE → OSM):
-            // Distance strongly dominates - LRP should be on top of the correct road
-            // Bearing helps distinguish parallel roads going different directions
-            // FRC is just a tiebreaker since mappings between providers differ
-            distance_weight: 4.0, // Primary - closest road strongly wins
-            bearing_weight: 0.2,  // Minor tiebreaker for parallel roads
-            frc_weight: 0.1,      // Minimal - FRC mappings are very approximate
+            search_radius_m: 100.0,         // 100m search radius for spatial index query
+            max_bearing_diff: 30.0,         // ±30 degrees bearing tolerance
+            frc_tolerance: 2,               // Allow ±2 FRC classes
+            max_candidates: 10,             // Keep top 10 candidates
+            max_candidate_distance_m: 35.0, // Reject candidates > 35m from LRP
+            // Scoring weights for cross-provider decoding (lower score is better):
+            // Distance heavily dominates - a spatially close match with wrong FRC/FOW
+            // is almost always better than a farther match with correct attributes.
+            // Bearing is a minor tiebreaker for parallel roads.
+            // FRC/FOW are nearly ignored since cross-provider mappings are unreliable.
+            distance_weight: 10.0, // Dominant - closest road almost always wins
+            bearing_weight: 0.2,   // Minor tiebreaker for parallel roads
+            frc_weight: 0.1,       // Small factor - FRC mappings unreliable across providers
+            fow_weight: 0.1,       // Small factor - FOW mappings unreliable across providers
         }
     }
 }
@@ -69,36 +77,34 @@ pub fn find_candidates(
             let edge_bearing = bearing_at_projection(coord, &env.geometry);
             let bearing_diff = bearing_difference(bearing, edge_bearing);
 
-            // Check bearing tolerance
+            // Check bearing tolerance (hard filter - bearing must be reasonably close)
             if bearing_diff > config.max_bearing_diff {
                 return None;
             }
 
-            // Check FRC compatibility
+            // Check FRC compatibility (hard filter with tolerance)
             let frc_diff = (edge.frc as i8 - frc as i8).unsigned_abs();
             if frc_diff > config.frc_tolerance {
                 return None;
             }
 
-            // Check FOW compatibility
-            let fow_compatible = edge.fow.is_compatible(fow);
-            if !fow_compatible {
-                return None;
-            }
+            // FOW is a soft scoring factor, not a hard filter
+            // Uses substitution score matrix from official OpenLR spec
+            let fow_score = edge.fow.substitution_score(fow);
 
             // Compute projection fraction
             let projection_fraction =
                 crate::spatial::project_point_to_line_fraction(coord, &env.geometry);
 
             // Compute score (lower is better)
-            let score = compute_score(distance_m, bearing_diff, frc_diff, config);
+            let score = compute_score(distance_m, bearing_diff, frc_diff, fow_score, config);
 
             Some(Candidate {
                 edge_idx: env.edge_idx,
                 distance_m,
                 bearing_diff,
                 frc_diff,
-                fow_compatible,
+                fow_score,
                 score,
                 projection_fraction,
             })
@@ -117,17 +123,22 @@ fn compute_score(
     distance_m: f64,
     bearing_diff: f64,
     frc_diff: u8,
+    fow_score: f64,
     config: &CandidateConfig,
 ) -> f64 {
-    // Normalize each component to 0-1 range
-    let distance_score = distance_m / config.search_radius_m;
-    let bearing_score = bearing_diff / config.max_bearing_diff;
-    let frc_score = frc_diff as f64 / config.frc_tolerance as f64;
+    // Normalize each component to 0-1 range (for penalty calculation)
+    let distance_penalty = distance_m / config.search_radius_m;
+    let bearing_penalty = bearing_diff / config.max_bearing_diff;
+    let frc_penalty = frc_diff as f64 / config.frc_tolerance as f64;
+    // FOW score is already 0-1, but higher is better, so invert it for penalty
+    // 1.0 (exact match) -> 0.0 penalty, 0.0 (incompatible) -> 1.0 penalty
+    let fow_penalty = 1.0 - fow_score;
 
-    // Weighted sum
-    config.distance_weight * distance_score
-        + config.bearing_weight * bearing_score
-        + config.frc_weight * frc_score
+    // Weighted sum of penalties
+    config.distance_weight * distance_penalty
+        + config.bearing_weight * bearing_penalty
+        + config.frc_weight * frc_penalty
+        + config.fow_weight * fow_penalty
 }
 
 /// Find candidates for the start of a line (uses start bearing)
@@ -168,8 +179,8 @@ mod tests {
     fn test_compute_score_perfect_match() {
         let config = CandidateConfig::default();
 
-        // Perfect match should have score 0
-        let score = compute_score(0.0, 0.0, 0, &config);
+        // Perfect match (fow_score=1.0 means exact FOW match) should have score 0
+        let score = compute_score(0.0, 0.0, 0, 1.0, &config);
         assert_eq!(score, 0.0);
     }
 
@@ -177,8 +188,8 @@ mod tests {
     fn test_compute_score_worse_match_higher_score() {
         let config = CandidateConfig::default();
 
-        let perfect_score = compute_score(0.0, 0.0, 0, &config);
-        let worse_score = compute_score(50.0, 15.0, 1, &config);
+        let perfect_score = compute_score(0.0, 0.0, 0, 1.0, &config);
+        let worse_score = compute_score(50.0, 15.0, 1, 0.75, &config);
         assert!(worse_score > perfect_score);
     }
 
@@ -186,11 +197,11 @@ mod tests {
     fn test_compute_score_distance_variations() {
         let config = CandidateConfig::default();
 
-        // Test various distance values with zero bearing/frc diff
-        let score_0m = compute_score(0.0, 0.0, 0, &config);
-        let score_10m = compute_score(10.0, 0.0, 0, &config);
-        let score_50m = compute_score(50.0, 0.0, 0, &config);
-        let score_100m = compute_score(100.0, 0.0, 0, &config);
+        // Test various distance values with zero bearing/frc diff and perfect FOW
+        let score_0m = compute_score(0.0, 0.0, 0, 1.0, &config);
+        let score_10m = compute_score(10.0, 0.0, 0, 1.0, &config);
+        let score_50m = compute_score(50.0, 0.0, 0, 1.0, &config);
+        let score_100m = compute_score(100.0, 0.0, 0, 1.0, &config);
 
         // Scores should increase with distance
         assert!(score_0m < score_10m);
@@ -198,18 +209,18 @@ mod tests {
         assert!(score_50m < score_100m);
 
         // At max search radius (100m), distance component should contribute
-        // distance_weight * (100 / 100) = 4.0 * 1.0 = 4.0
-        assert!((score_100m - 4.0).abs() < 0.001);
+        // distance_weight * (100 / 100) = 10.0 * 1.0 = 10.0
+        assert!((score_100m - 10.0).abs() < 0.001);
     }
 
     #[test]
     fn test_compute_score_bearing_variations() {
         let config = CandidateConfig::default();
 
-        // Test various bearing differences with zero distance/frc diff
-        let score_0deg = compute_score(0.0, 0.0, 0, &config);
-        let score_15deg = compute_score(0.0, 15.0, 0, &config);
-        let score_30deg = compute_score(0.0, 30.0, 0, &config);
+        // Test various bearing differences with zero distance/frc diff and perfect FOW
+        let score_0deg = compute_score(0.0, 0.0, 0, 1.0, &config);
+        let score_15deg = compute_score(0.0, 15.0, 0, 1.0, &config);
+        let score_30deg = compute_score(0.0, 30.0, 0, 1.0, &config);
 
         // Scores should increase with bearing difference
         assert!(score_0deg < score_15deg);
@@ -224,10 +235,10 @@ mod tests {
     fn test_compute_score_frc_variations() {
         let config = CandidateConfig::default();
 
-        // Test various FRC differences with zero distance/bearing diff
-        let score_frc0 = compute_score(0.0, 0.0, 0, &config);
-        let score_frc1 = compute_score(0.0, 0.0, 1, &config);
-        let score_frc2 = compute_score(0.0, 0.0, 2, &config);
+        // Test various FRC differences with zero distance/bearing diff and perfect FOW
+        let score_frc0 = compute_score(0.0, 0.0, 0, 1.0, &config);
+        let score_frc1 = compute_score(0.0, 0.0, 1, 1.0, &config);
+        let score_frc2 = compute_score(0.0, 0.0, 2, 1.0, &config);
 
         // Scores should increase with FRC difference
         assert!(score_frc0 < score_frc1);
@@ -239,33 +250,54 @@ mod tests {
     }
 
     #[test]
+    fn test_compute_score_fow_variations() {
+        let config = CandidateConfig::default();
+
+        // Test various FOW scores with zero distance/bearing/frc diff
+        let score_perfect_fow = compute_score(0.0, 0.0, 0, 1.0, &config); // exact match
+        let score_good_fow = compute_score(0.0, 0.0, 0, 0.75, &config); // compatible
+        let score_partial_fow = compute_score(0.0, 0.0, 0, 0.5, &config); // partially compatible
+        let score_bad_fow = compute_score(0.0, 0.0, 0, 0.0, &config); // incompatible
+
+        // Scores should increase as FOW match gets worse
+        assert!(score_perfect_fow < score_good_fow);
+        assert!(score_good_fow < score_partial_fow);
+        assert!(score_partial_fow < score_bad_fow);
+
+        // At worst FOW (0.0), FOW component should contribute
+        // fow_weight * (1.0 - 0.0) = 0.1 * 1.0 = 0.1
+        assert!((score_bad_fow - 0.1).abs() < 0.001);
+    }
+
+    #[test]
     fn test_compute_score_distance_dominates() {
         let config = CandidateConfig::default();
 
-        // Distance should dominate scoring (weight 4.0 vs 0.2 and 0.1)
-        // A closer edge with worse bearing/frc should beat a farther edge with perfect bearing/frc
-        let close_bad_bearing = compute_score(10.0, 30.0, 2, &config);
-        let far_perfect = compute_score(50.0, 0.0, 0, &config);
+        // Distance should dominate scoring (weight 10.0 vs 0.2, 0.1, 0.1)
+        // A closer edge with worse bearing/frc/fow should beat a farther edge with perfect attributes
+        let close_bad = compute_score(10.0, 30.0, 3, 0.0, &config);
+        let far_perfect = compute_score(50.0, 0.0, 0, 1.0, &config);
 
-        // close_bad_bearing = 4.0 * 0.1 + 0.2 * 1.0 + 0.1 * 1.0 = 0.4 + 0.2 + 0.1 = 0.7
-        // far_perfect = 4.0 * 0.5 + 0 + 0 = 2.0
-        assert!(close_bad_bearing < far_perfect);
+        // close_bad = 10.0 * 0.1 + 0.2 * 1.0 + 0.1 * 1.0 + 0.1 * 1.0 = 1.0 + 0.2 + 0.1 + 0.1 = 1.4
+        // far_perfect = 10.0 * 0.5 + 0 + 0 + 0 = 5.0
+        assert!(close_bad < far_perfect);
     }
 
     #[test]
     fn test_compute_score_maximum_values() {
         let config = CandidateConfig::default();
 
-        // Maximum everything should give maximum score
+        // Maximum everything (worst possible) should give maximum score
         let max_score = compute_score(
             config.search_radius_m,
             config.max_bearing_diff,
             config.frc_tolerance,
+            0.0, // worst FOW score
             &config,
         );
 
-        // max_score = 4.0 * 1.0 + 0.2 * 1.0 + 0.1 * 1.0 = 4.3
-        let expected = config.distance_weight + config.bearing_weight + config.frc_weight;
+        let expected =
+            config.distance_weight + config.bearing_weight + config.frc_weight + config.fow_weight;
         assert!((max_score - expected).abs() < 0.001);
     }
 
@@ -276,7 +308,7 @@ mod tests {
             distance_m: 0.0,
             bearing_diff: 0.0,
             frc_diff: 0,
-            fow_compatible: true,
+            fow_score: 1.0,
             score,
             projection_fraction: 0.5,
         }
@@ -365,12 +397,12 @@ mod tests {
     fn test_candidate_sorting_realistic_scores() {
         let config = CandidateConfig::default();
 
-        // Create candidates with realistic computed scores
-        let perfect = make_candidate(compute_score(0.0, 0.0, 0, &config));
-        let good = make_candidate(compute_score(5.0, 5.0, 0, &config));
-        let medium = make_candidate(compute_score(20.0, 10.0, 1, &config));
-        let poor = make_candidate(compute_score(50.0, 20.0, 2, &config));
-        let worst = make_candidate(compute_score(100.0, 30.0, 2, &config));
+        // Create candidates with realistic computed scores (fow_score=1.0 for all)
+        let perfect = make_candidate(compute_score(0.0, 0.0, 0, 1.0, &config));
+        let good = make_candidate(compute_score(5.0, 5.0, 0, 1.0, &config));
+        let medium = make_candidate(compute_score(20.0, 10.0, 1, 0.75, &config));
+        let poor = make_candidate(compute_score(50.0, 20.0, 2, 0.5, &config));
+        let worst = make_candidate(compute_score(100.0, 30.0, 2, 0.0, &config));
 
         let mut candidates = [
             medium.clone(),
@@ -407,10 +439,10 @@ mod tests {
         // Verify score increases monotonically with each parameter
         let config = CandidateConfig::default();
 
-        // Distance monotonicity
+        // Distance monotonicity (with perfect FOW)
         let mut prev_score = 0.0;
         for distance in [0.0, 10.0, 20.0, 50.0, 100.0] {
-            let score = compute_score(distance, 0.0, 0, &config);
+            let score = compute_score(distance, 0.0, 0, 1.0, &config);
             assert!(
                 score >= prev_score,
                 "Score should increase with distance: {} at {}m vs {} before",
@@ -424,7 +456,7 @@ mod tests {
         // Bearing monotonicity
         prev_score = 0.0;
         for bearing in [0.0, 5.0, 10.0, 20.0, 30.0] {
-            let score = compute_score(0.0, bearing, 0, &config);
+            let score = compute_score(0.0, bearing, 0, 1.0, &config);
             assert!(
                 score >= prev_score,
                 "Score should increase with bearing diff: {} at {}° vs {} before",
@@ -438,12 +470,26 @@ mod tests {
         // FRC monotonicity
         prev_score = 0.0;
         for frc in [0, 1, 2] {
-            let score = compute_score(0.0, 0.0, frc, &config);
+            let score = compute_score(0.0, 0.0, frc, 1.0, &config);
             assert!(
                 score >= prev_score,
                 "Score should increase with FRC diff: {} at frc_diff={} vs {} before",
                 score,
                 frc,
+                prev_score
+            );
+            prev_score = score;
+        }
+
+        // FOW monotonicity (lower fow_score = worse match = higher penalty)
+        prev_score = 0.0;
+        for fow_score in [1.0, 0.75, 0.5, 0.25, 0.0] {
+            let score = compute_score(0.0, 0.0, 0, fow_score, &config);
+            assert!(
+                score >= prev_score,
+                "Score should increase with worse FOW: {} at fow_score={} vs {} before",
+                score,
+                fow_score,
                 prev_score
             );
             prev_score = score;
@@ -458,20 +504,24 @@ mod tests {
             max_bearing_diff: 45.0,
             frc_tolerance: 3,
             max_candidates: 5,
+            max_candidate_distance_m: 50.0,
             distance_weight: 1.0,
             bearing_weight: 1.0,
             frc_weight: 1.0,
+            fow_weight: 1.0,
         };
 
         // With equal weights, all components contribute equally at their max values
-        let max_score = compute_score(50.0, 45.0, 3, &custom_config);
-        // Each component: 1.0 * 1.0 = 1.0, total = 3.0
-        assert!((max_score - 3.0).abs() < 0.001);
+        // fow_score=0.0 gives max penalty of 1.0
+        let max_score = compute_score(50.0, 45.0, 3, 0.0, &custom_config);
+        // Each component: 1.0 * 1.0 = 1.0, total = 4.0
+        assert!((max_score - 4.0).abs() < 0.001);
 
         // Half values should give half score
-        let half_score = compute_score(25.0, 22.5, 1, &custom_config);
-        // distance: 1.0 * 0.5 = 0.5, bearing: 1.0 * 0.5 = 0.5, frc: 1.0 * (1/3) ≈ 0.333
-        let expected_half = 0.5 + 0.5 + (1.0 / 3.0);
+        // fow_score=0.5 gives penalty of 0.5
+        let half_score = compute_score(25.0, 22.5, 1, 0.5, &custom_config);
+        // distance: 1.0 * 0.5 = 0.5, bearing: 1.0 * 0.5 = 0.5, frc: 1.0 * (1/3) ≈ 0.333, fow: 1.0 * 0.5 = 0.5
+        let expected_half = 0.5 + 0.5 + (1.0 / 3.0) + 0.5;
         assert!((half_score - expected_half).abs() < 0.001);
     }
 }
