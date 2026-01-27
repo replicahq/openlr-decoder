@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "if echo \"$TOOL_INPUT\" | grep -q 'git commit'; then cargo fmt 2>/dev/null; ruff format . 2>/dev/null; git add -u 2>/dev/null; fi"
+            "command": "if echo \"$TOOL_INPUT\" | grep -q 'git commit'; then DIR=$(echo \"$TOOL_INPUT\" | grep -oE '/Users/brett/openlr-decoder[^\"]*' | head -1); [ -n \"$DIR\" ] && cd \"$DIR\" 2>/dev/null; cargo fmt 2>/dev/null; git add -u 2>/dev/null; fi"
           }
         ]
       }
