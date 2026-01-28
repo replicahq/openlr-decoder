@@ -1,15 +1,2 @@
 {
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "if cat /dev/stdin | grep -q 'git commit'; then cd /Users/brett/openlr-decoder && cargo fmt 2>/dev/null && git add -u 2>/dev/null; fi"
-          }
-        ]
-      }
-    ]
-  }
 }
