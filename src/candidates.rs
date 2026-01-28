@@ -1,4 +1,4 @@
-use geo::Point;
+use geo::{Closest, HaversineClosestPoint, HaversineDistance, Point};
 use petgraph::graph::EdgeIndex;
 
 use crate::graph::{Fow, Frc, RoadNetwork};
@@ -65,16 +65,32 @@ pub fn find_candidates(
     spatial: &SpatialIndex,
     config: &CandidateConfig,
 ) -> Vec<Candidate> {
-    // Find nearby edges
-    let nearby = spatial.find_within_radius(coord, config.search_radius_m);
+    // Find nearby edges using bbox query (with buffer for bbox approximation)
+    let nearby = spatial.find_nearby(coord, config.search_radius_m * 1.5);
 
     let mut candidates: Vec<Candidate> = nearby
         .into_iter()
-        .filter_map(|(env, distance_m)| {
+        .filter_map(|env| {
             let edge = network.edge(env.edge_idx)?;
 
+            // Compute precise distance using geometry from the graph
+            let closest = match edge.geometry.haversine_closest_point(&coord) {
+                Closest::SinglePoint(p) | Closest::Intersection(p) => p,
+                Closest::Indeterminate => {
+                    // Fallback to first coordinate of the geometry
+                    let first = edge.geometry.coords().next()?;
+                    Point::new(first.x, first.y)
+                }
+            };
+            let distance_m = coord.haversine_distance(&closest);
+
+            // Filter by actual radius
+            if distance_m > config.search_radius_m {
+                return None;
+            }
+
             // Compute bearing at the projection point (where LRP projects onto edge)
-            let edge_bearing = bearing_at_projection(coord, &env.geometry);
+            let edge_bearing = bearing_at_projection(coord, &edge.geometry);
             let bearing_diff = bearing_difference(bearing, edge_bearing);
 
             // Check bearing tolerance (hard filter - bearing must be reasonably close)
@@ -94,7 +110,7 @@ pub fn find_candidates(
 
             // Compute projection fraction
             let projection_fraction =
-                crate::spatial::project_point_to_line_fraction(coord, &env.geometry);
+                crate::spatial::project_point_to_line_fraction(coord, &edge.geometry);
 
             // Compute score (lower is better)
             let score = compute_score(distance_m, bearing_diff, frc_diff, fow_score, config);
