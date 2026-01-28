@@ -223,7 +223,12 @@ mod tests {
             .add_edge(100, 1, 2, 5000.0, Frc::Frc2, Fow::SingleCarriageway)
             .build();
 
-        let edge_idx = network.edge_id_to_index.as_ref().unwrap().get(&100).unwrap();
+        let edge_idx = network
+            .edge_id_to_index
+            .as_ref()
+            .unwrap()
+            .get(&100)
+            .unwrap();
         let edge = network.edge(*edge_idx).unwrap();
 
         assert_eq!(edge.id, 100);
@@ -243,7 +248,12 @@ mod tests {
             .add_edge_auto_length(100, 1, 2, Frc::Frc2, Fow::SingleCarriageway)
             .build();
 
-        let edge_idx = network.edge_id_to_index.as_ref().unwrap().get(&100).unwrap();
+        let edge_idx = network
+            .edge_id_to_index
+            .as_ref()
+            .unwrap()
+            .get(&100)
+            .unwrap();
         let edge = network.edge(*edge_idx).unwrap();
 
         // 1 degree of longitude at 52° lat is roughly 68km

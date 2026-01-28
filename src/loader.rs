@@ -99,10 +99,7 @@ pub fn load_network_from_parquet(path: &Path) -> Result<(RoadNetwork, SpatialInd
 
     let reader = builder.build()?;
 
-    build_network_from_batches_with_hint(
-        reader.map(|r| r.map_err(|e| anyhow!(e))),
-        edge_count_hint,
-    )
+    build_network_from_batches_with_hint(reader.map(|r| r.map_err(|e| anyhow!(e))), edge_count_hint)
 }
 
 /// Build a road network from an iterator of Arrow RecordBatches.
