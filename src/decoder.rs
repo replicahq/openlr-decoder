@@ -621,9 +621,11 @@ impl<'a> Decoder<'a> {
         let abs_min = (expected_distance - self.config.absolute_length_tolerance).max(0.0);
         let min_distance = rel_min.min(abs_min).max(10.0); // Absolute floor of 10m
 
-        // For maximum: use whichever is STRICTER (limits longer paths)
+        // For maximum: use whichever is MORE GENEROUS
+        // For short segments, absolute tolerance provides necessary slack for cross-provider
+        // geometry differences; for long segments, relative tolerance is more appropriate
         let abs_max = expected_distance + self.config.absolute_length_tolerance;
-        let max_valid_distance = rel_max.min(abs_max);
+        let max_valid_distance = rel_max.max(abs_max);
 
         // Maximum distance for A* search - don't explore beyond this
         // Use max_search_distance_factor to bound the search, with a minimum of 500m
@@ -662,185 +664,225 @@ impl<'a> Decoder<'a> {
         let mut best_path: Option<PathResult> = None;
         let mut best_score = f64::MAX;
 
-        // Try pairs in order of best combined candidate score
-        for (start_idx, end_idx, _combined_score) in pairs {
-            let start_cand = &start_candidates[start_idx];
-            let end_cand = &end_candidates[end_idx];
+        // Two-pass approach for LFRCNP: try strict first, then fallback to relaxed
+        // This prevents mixing valid FRC edges with invalid ones (e.g., taking a
+        // residential detour when a primary road path exists within LFRCNP)
+        for use_relaxed_lfrcnp in [false, true] {
+            // If we found a path in strict pass, skip relaxed pass
+            if use_relaxed_lfrcnp && best_path.is_some() {
+                break;
+            }
 
-            // Special case: both LRPs on the same edge
-            if start_cand.edge_idx == end_cand.edge_idx {
-                if let Some(edge) = self.network.edge(start_cand.edge_idx) {
-                    // Calculate distance along edge between projection points
-                    let frac_diff = end_cand.projection_fraction - start_cand.projection_fraction;
+            for (start_idx, end_idx, _combined_score) in pairs.iter().copied() {
+                let start_cand = &start_candidates[start_idx];
+                let end_cand = &end_candidates[end_idx];
 
-                    // Only valid if end is after start on the edge (positive direction)
-                    if frac_diff > 0.0 {
-                        let path_cost = edge.length_m * frac_diff;
+                // Check if end candidate's edge respects LFRCNP constraint
+                // This prevents routing to lower-class roads (e.g., residential when LFRCNP=3)
+                let end_edge_frc = self
+                    .network
+                    .edge(end_cand.edge_idx)
+                    .map(|e| e.frc)
+                    .unwrap_or(Frc::Frc7);
+                let end_edge_fow = self
+                    .network
+                    .edge(end_cand.edge_idx)
+                    .map(|e| e.fow)
+                    .unwrap_or(Fow::Other);
 
-                        // For same-edge case with excellent spatial matches (both < 5m),
-                        // allow more length flexibility for cross-provider decoding
-                        let excellent_spatial_match =
-                            start_cand.distance_m < 5.0 && end_cand.distance_m < 5.0;
-                        let relaxed_max = if excellent_spatial_match {
-                            max_valid_distance * 3.0 // Allow up to 3x for very close matches
-                        } else {
-                            max_valid_distance
-                        };
+                // Apply LFRCNP to end candidate
+                // SlipRoads are always allowed (they connect different road classes)
+                let is_slip_road = end_edge_fow == Fow::SlipRoad;
+                let max_allowed_frc = match (lfrcnp, use_relaxed_lfrcnp) {
+                    (Some(frc), false) => frc,                                        // Strict
+                    (Some(frc), true) => Frc::from_u8((frc as u8).saturating_add(1)), // Relaxed +1
+                    (None, _) => Frc::Frc7, // No constraint
+                };
 
-                        if path_cost >= min_distance && path_cost <= relaxed_max {
-                            let length_diff =
-                                (path_cost - expected_distance).abs() / expected_distance.max(1.0);
-                            let score = start_cand.score + end_cand.score + length_diff;
+                // Skip candidates that don't respect current LFRCNP threshold
+                if end_edge_frc > max_allowed_frc && !is_slip_road {
+                    continue;
+                }
 
-                            if score < best_score {
-                                best_score = score;
-                                best_path = Some(PathResult {
-                                    edges: vec![start_cand.edge_idx],
-                                    coverages: vec![EdgeCoverage {
-                                        edge_idx: start_cand.edge_idx,
-                                        coverage_m: path_cost,
-                                    }],
-                                    total_length: path_cost,
-                                });
+                // Special case: both LRPs on the same edge
+                if start_cand.edge_idx == end_cand.edge_idx {
+                    if let Some(edge) = self.network.edge(start_cand.edge_idx) {
+                        // Calculate distance along edge between projection points
+                        let frac_diff =
+                            end_cand.projection_fraction - start_cand.projection_fraction;
 
-                                if length_diff < 0.1 {
-                                    break;
+                        // Only valid if end is after start on the edge (positive direction)
+                        if frac_diff > 0.0 {
+                            let path_cost = edge.length_m * frac_diff;
+
+                            // For same-edge case with excellent spatial matches (both < 5m),
+                            // allow more length flexibility for cross-provider decoding
+                            let excellent_spatial_match =
+                                start_cand.distance_m < 5.0 && end_cand.distance_m < 5.0;
+                            let relaxed_max = if excellent_spatial_match {
+                                max_valid_distance * 3.0 // Allow up to 3x for very close matches
+                            } else {
+                                max_valid_distance
+                            };
+
+                            if path_cost >= min_distance && path_cost <= relaxed_max {
+                                let length_diff = (path_cost - expected_distance).abs()
+                                    / expected_distance.max(1.0);
+                                let score = start_cand.score + end_cand.score + length_diff;
+
+                                if score < best_score {
+                                    best_score = score;
+                                    best_path = Some(PathResult {
+                                        edges: vec![start_cand.edge_idx],
+                                        coverages: vec![EdgeCoverage {
+                                            edge_idx: start_cand.edge_idx,
+                                            coverage_m: path_cost,
+                                        }],
+                                        total_length: path_cost,
+                                    });
+
+                                    if length_diff < 0.1 {
+                                        break;
+                                    }
                                 }
                             }
                         }
                     }
+                    continue;
                 }
-                continue;
-            }
 
-            // For the start edge, we typically exit from the target node (continuing in travel direction)
-            // For the end edge, we typically enter at the source node
-            let start_node = match self.network.edge_target(start_cand.edge_idx) {
-                Some(n) => n,
-                None => continue,
-            };
-            let end_node = match self.network.edge_source(end_cand.edge_idx) {
-                Some(n) => n,
-                None => continue,
-            };
-
-            // Get end node coordinates for A* heuristic
-            let end_coord = match self.network.node(end_node) {
-                Some(n) => n.coord,
-                None => continue,
-            };
-
-            // Calculate partial edge lengths to add to path cost
-            // Start edge: from projection point to target = (1 - fraction) * length
-            // End edge: from source to projection point = fraction * length
-            let start_edge_partial = self
-                .network
-                .edge(start_cand.edge_idx)
-                .map(|e| e.length_m * (1.0 - start_cand.projection_fraction))
-                .unwrap_or(0.0);
-            let end_edge_partial = self
-                .network
-                .edge(end_cand.edge_idx)
-                .map(|e| e.length_m * end_cand.projection_fraction)
-                .unwrap_or(0.0);
-
-            // Adjust max search for the middle path portion
-            let middle_max = max_search_distance - start_edge_partial - end_edge_partial;
-            if middle_max <= 0.0 {
-                continue;
-            }
-
-            // Apply LFRCNP constraint with +1 tolerance for cross-provider decoding.
-            // HERE's FRC classes rarely align exactly with OSM highway tags (see CLAUDE.md).
-            // For example, HERE FRC2 may correspond to OSM `secondary` which maps to FRC3.
-            // The +1 tolerance ensures we don't reject edges that represent the same road.
-            // SlipRoad/link edges are also allowed regardless of FRC (handled in bounded_astar).
-            let max_frc = lfrcnp.map(|frc| Frc::from_u8((frc as u8).saturating_add(1)));
-
-            // Run bounded A* for the middle portion (between edges)
-            let (middle_cost, path_nodes) = if start_node == end_node {
-                // Start and end edges share a node - no middle path needed
-                (0.0, vec![start_node])
-            } else {
-                match bounded_astar(
-                    self.network,
-                    start_node,
-                    end_node,
-                    end_coord,
-                    middle_max,
-                    max_frc,
-                ) {
-                    Some(result) => result,
+                // For the start edge, we typically exit from the target node (continuing in travel direction)
+                // For the end edge, we typically enter at the source node
+                let start_node = match self.network.edge_target(start_cand.edge_idx) {
+                    Some(n) => n,
                     None => continue,
+                };
+                let end_node = match self.network.edge_source(end_cand.edge_idx) {
+                    Some(n) => n,
+                    None => continue,
+                };
+
+                // Get end node coordinates for A* heuristic
+                let end_coord = match self.network.node(end_node) {
+                    Some(n) => n.coord,
+                    None => continue,
+                };
+
+                // Calculate partial edge lengths to add to path cost
+                // Start edge: from projection point to target = (1 - fraction) * length
+                // End edge: from source to projection point = fraction * length
+                let start_edge_partial = self
+                    .network
+                    .edge(start_cand.edge_idx)
+                    .map(|e| e.length_m * (1.0 - start_cand.projection_fraction))
+                    .unwrap_or(0.0);
+                let end_edge_partial = self
+                    .network
+                    .edge(end_cand.edge_idx)
+                    .map(|e| e.length_m * end_cand.projection_fraction)
+                    .unwrap_or(0.0);
+
+                // Adjust max search for the middle path portion
+                let middle_max = max_search_distance - start_edge_partial - end_edge_partial;
+                if middle_max <= 0.0 {
+                    continue;
                 }
-            };
 
-            // Total path cost includes partial edge traversals
-            let path_cost = start_edge_partial + middle_cost + end_edge_partial;
+                // Run bounded A* for the middle portion (between edges)
+                // SlipRoad/link edges are always allowed regardless of FRC (handled in bounded_astar).
+                // Only use relaxed LFRCNP (+1) when we're in the relaxed pass for candidates,
+                // to prevent mixed-class paths from sneaking through the strict pass.
+                let max_frc_for_astar = if use_relaxed_lfrcnp {
+                    lfrcnp.map(|frc| Frc::from_u8((frc as u8).saturating_add(1)))
+                } else {
+                    lfrcnp
+                };
 
-            // Check if path length is within tolerance
-            if path_cost < min_distance || path_cost > max_valid_distance {
-                continue;
-            }
+                let (middle_cost, path_nodes) = if start_node == end_node {
+                    // Start and end edges share a node - no middle path needed
+                    (0.0, vec![start_node])
+                } else {
+                    match bounded_astar(
+                        self.network,
+                        start_node,
+                        end_node,
+                        end_coord,
+                        middle_max,
+                        max_frc_for_astar,
+                    ) {
+                        Some(result) => result,
+                        None => continue,
+                    }
+                };
 
-            // Build edge list: start_edge + middle edges + end_edge
-            // Skip start/end edges if they contribute negligible length (< 3% of path)
-            // This avoids including spurious edges when an LRP is at a junction
-            const MIN_EDGE_CONTRIBUTION: f64 = 0.03; // 3% of path length
-            let mut edges = Vec::new();
-            let mut coverages = Vec::new();
+                // Total path cost includes partial edge traversals
+                let path_cost = start_edge_partial + middle_cost + end_edge_partial;
 
-            if start_edge_partial / path_cost >= MIN_EDGE_CONTRIBUTION {
-                edges.push(start_cand.edge_idx);
-                coverages.push(EdgeCoverage {
-                    edge_idx: start_cand.edge_idx,
-                    coverage_m: start_edge_partial,
-                });
-            }
+                // Check if path length is within tolerance
+                if path_cost < min_distance || path_cost > max_valid_distance {
+                    continue;
+                }
 
-            // Add middle edges with their full lengths
-            let middle_edges = self.nodes_to_edges(&path_nodes);
-            for &edge_idx in &middle_edges {
-                if let Some(edge) = self.network.edge(edge_idx) {
-                    edges.push(edge_idx);
+                // Build edge list: start_edge + middle edges + end_edge
+                // Skip start/end edges if they contribute negligible length (< 3% of path)
+                // This avoids including spurious edges when an LRP is at a junction
+                const MIN_EDGE_CONTRIBUTION: f64 = 0.03; // 3% of path length
+                let mut edges = Vec::new();
+                let mut coverages = Vec::new();
+
+                if start_edge_partial / path_cost >= MIN_EDGE_CONTRIBUTION {
+                    edges.push(start_cand.edge_idx);
                     coverages.push(EdgeCoverage {
-                        edge_idx,
-                        coverage_m: edge.length_m,
+                        edge_idx: start_cand.edge_idx,
+                        coverage_m: start_edge_partial,
                     });
                 }
-            }
 
-            if end_cand.edge_idx != start_cand.edge_idx
-                && end_edge_partial / path_cost >= MIN_EDGE_CONTRIBUTION
-            {
-                edges.push(end_cand.edge_idx);
-                coverages.push(EdgeCoverage {
-                    edge_idx: end_cand.edge_idx,
-                    coverage_m: end_edge_partial,
-                });
-            }
-
-            // Score the path (additive for final ranking)
-            let length_diff = (path_cost - expected_distance).abs() / expected_distance.max(1.0);
-            let score = start_cand.score + end_cand.score + length_diff;
-
-            if score < best_score {
-                best_score = score;
-                best_path = Some(PathResult {
-                    edges,
-                    coverages,
-                    total_length: path_cost,
-                });
-
-                // Early termination: if we found a good match, stop searching
-                // Since pairs are sorted by candidate quality, the first valid
-                // path with good length match is likely optimal
-                if length_diff < 0.1 {
-                    // Path length within 10% of expected
-                    break;
+                // Add middle edges with their full lengths
+                let middle_edges = self.nodes_to_edges(&path_nodes);
+                for &edge_idx in &middle_edges {
+                    if let Some(edge) = self.network.edge(edge_idx) {
+                        edges.push(edge_idx);
+                        coverages.push(EdgeCoverage {
+                            edge_idx,
+                            coverage_m: edge.length_m,
+                        });
+                    }
                 }
-            }
-        }
+
+                if end_cand.edge_idx != start_cand.edge_idx
+                    && end_edge_partial / path_cost >= MIN_EDGE_CONTRIBUTION
+                {
+                    edges.push(end_cand.edge_idx);
+                    coverages.push(EdgeCoverage {
+                        edge_idx: end_cand.edge_idx,
+                        coverage_m: end_edge_partial,
+                    });
+                }
+
+                // Score the path (additive for final ranking)
+                let length_diff =
+                    (path_cost - expected_distance).abs() / expected_distance.max(1.0);
+                let score = start_cand.score + end_cand.score + length_diff;
+
+                if score < best_score {
+                    best_score = score;
+                    best_path = Some(PathResult {
+                        edges,
+                        coverages,
+                        total_length: path_cost,
+                    });
+
+                    // Early termination: if we found a good match, stop searching
+                    // Since pairs are sorted by candidate quality, the first valid
+                    // path with good length match is likely optimal
+                    if length_diff < 0.1 {
+                        // Path length within 10% of expected
+                        break;
+                    }
+                }
+            } // end inner for loop over pairs
+        } // end outer for loop over [strict, relaxed]
 
         best_path.ok_or(DecodeError::NoPath {
             from: lrp_index,
