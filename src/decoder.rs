@@ -97,8 +97,13 @@ fn bounded_astar(
         for edge in network.graph.edges(current.node) {
             // LFRCNP filtering: skip edges with FRC higher (less important) than allowed
             // Per OpenLR spec, if LFRCNP = FRC3, only traverse edges with FRC 0, 1, 2, or 3
+            //
+            // Exception: SlipRoad (ramps/links) are always allowed regardless of FRC.
+            // This handles cross-provider mapping where motorway_link is FRC3 in OSM
+            // but should be traversable when connecting to/from motorways (FRC0/FRC1).
             if let Some(max) = max_frc {
-                if edge.weight().frc > max {
+                let is_slip_road = edge.weight().fow == Fow::SlipRoad;
+                if edge.weight().frc > max && !is_slip_road {
                     continue;
                 }
             }
@@ -745,12 +750,12 @@ impl<'a> Decoder<'a> {
                 continue;
             }
 
-            // Apply LFRCNP constraint with +1 tolerance for cross-provider decoding
-            // This accounts for FRC mapping differences between HERE and OSM
-            let max_frc = lfrcnp.map(|frc| {
-                // Add 1 level of tolerance (e.g., LFRCNP=FRC3 allows up to FRC4)
-                Frc::from_u8((frc as u8).saturating_add(1))
-            });
+            // Apply LFRCNP constraint with +1 tolerance for cross-provider decoding.
+            // HERE's FRC classes rarely align exactly with OSM highway tags (see CLAUDE.md).
+            // For example, HERE FRC2 may correspond to OSM `secondary` which maps to FRC3.
+            // The +1 tolerance ensures we don't reject edges that represent the same road.
+            // SlipRoad/link edges are also allowed regardless of FRC (handled in bounded_astar).
+            let max_frc = lfrcnp.map(|frc| Frc::from_u8((frc as u8).saturating_add(1)));
 
             // Run bounded A* for the middle portion (between edges)
             let (middle_cost, path_nodes) = if start_node == end_node {
