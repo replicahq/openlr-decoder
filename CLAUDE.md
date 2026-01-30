@@ -152,10 +152,11 @@ The app shows:
 
 ### Debugging Approach
 
-1. **Visualize the LRPs**: See where they land on the map
-2. **Check candidate edges**: Are the correct roads being found?
-3. **Verify connectivity**: Can A* find a path between candidate pairs?
-4. **Compare path length**: Does actual length match DNP expectations?
+1. Never manually decode OpenLR references using custom code: only use the Python or Rust libraries.
+2. **Visualize the LRPs**: See where they land on the map
+3. **Check candidate edges**: Are the correct roads being found?
+4. **Verify connectivity**: Can A* find a path between candidate pairs?
+5. **Compare path length**: Does actual length match DNP expectations?
 
 ### Configuration Tuning
 
