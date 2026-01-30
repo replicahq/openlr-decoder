@@ -454,8 +454,6 @@ fn process_batch(
 
     #[cfg(feature = "loader_profiler")]
     profiler.add_node_time(node_start.elapsed());
-    #[cfg(feature = "loader_profiler")]
-    profiler.add_node_time(node_start.elapsed());
 
     // PARALLEL PHASE: Process all rows in parallel (geometry parsing, FRC/FOW, metrics, Edge construction)
     #[cfg(feature = "loader_profiler")]
