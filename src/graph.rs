@@ -172,7 +172,31 @@ pub struct Edge {
 }
 
 impl Edge {
-    /// Create edge from geometry with computed attributes
+    /// Create edge from geometry with pre-computed metrics.
+    /// Use this when metrics have already been computed during geometry parsing.
+    pub fn from_precomputed(
+        id: u64,
+        geometry: LineString<f64>,
+        frc: Frc,
+        fow: Fow,
+        length_m: f64,
+        bearing_start: f64,
+        bearing_end: f64,
+    ) -> Self {
+        Edge {
+            id,
+            geometry,
+            length_m,
+            frc,
+            fow,
+            bearing_start,
+            bearing_end,
+        }
+    }
+
+    /// Create edge from geometry with computed attributes.
+    /// Use this when parsing geometry separately from metrics computation.
+    #[allow(dead_code)]
     pub fn new(id: u64, geometry: LineString<f64>, frc: Frc, fow: Fow) -> Self {
         let length_m = geometry.geodesic_length();
         let (bearing_start, bearing_end) = Self::compute_bearings(&geometry);

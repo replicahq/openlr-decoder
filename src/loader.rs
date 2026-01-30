@@ -1,6 +1,6 @@
 //! Load road network from parquet files matching the BigQuery export schema
 
-use std::collections::HashMap;
+use ahash::{AHashMap, AHashSet};
 use std::fs::File;
 use std::path::Path;
 
@@ -10,15 +10,19 @@ use arrow::array::{
     LargeStringArray, RecordBatch, StringArray, StringViewArray, UInt64Array,
 };
 use arrow::datatypes::{DataType, Field, Schema};
-use geo::{LineString, Point};
+use geo::{GeodesicBearing, LineString, Point};
 use geoarrow_array::array::LineStringArray;
 use geoarrow_array::{GeoArrowArray, GeoArrowArrayAccessor};
 use geoarrow_schema::GeoArrowType;
 use geozero::{wkb, wkt, ToGeo};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use rayon::prelude::*;
 
 use crate::graph::{Edge, Fow, Frc, Node, RoadNetwork};
 use crate::spatial::{EdgeEnvelope, SpatialIndex};
+
+#[cfg(feature = "loader_profiler")]
+use std::time::{Duration, Instant};
 
 /// Geometry column format detected from Arrow schema
 enum GeometryFormat<'a> {
@@ -42,6 +46,140 @@ enum WktSource<'a> {
     String(&'a StringArray),
     LargeString(&'a LargeStringArray),
     StringView(&'a StringViewArray),
+}
+
+/// Geometry with pre-computed metrics to avoid redundant passes over coordinates
+struct GeometryWithMetrics {
+    geometry: LineString<f64>,
+    length_m: f64,
+    bearing_start: f64,
+    bearing_end: f64,
+}
+
+#[cfg(feature = "loader_profiler")]
+#[derive(Default)]
+struct LoaderProfiler {
+    batches: usize,
+    rows: usize,
+    column_time: Duration,
+    node_time: Duration,
+    geometry_time: Duration,
+    edge_time: Duration,
+    envelope_time: Duration,
+    batch_time: Duration,
+    spatial_time: Duration,
+    parallel_time: Duration,
+    sequential_time: Duration,
+}
+
+#[cfg(feature = "loader_profiler")]
+impl LoaderProfiler {
+    fn record_batch(&mut self, rows: usize, duration: Duration) {
+        self.batches += 1;
+        self.rows += rows;
+        self.batch_time += duration;
+    }
+
+    fn add_column_time(&mut self, duration: Duration) {
+        self.column_time += duration;
+    }
+
+    fn add_node_time(&mut self, duration: Duration) {
+        self.node_time += duration;
+    }
+
+    fn add_geometry_time(&mut self, duration: Duration) {
+        self.geometry_time += duration;
+    }
+
+    fn add_edge_time(&mut self, duration: Duration) {
+        self.edge_time += duration;
+    }
+
+    fn add_envelope_time(&mut self, duration: Duration) {
+        self.envelope_time += duration;
+    }
+
+    fn set_spatial_time(&mut self, duration: Duration) {
+        self.spatial_time = duration;
+    }
+
+    fn add_parallel_time(&mut self, duration: Duration) {
+        self.parallel_time += duration;
+    }
+
+    fn add_sequential_time(&mut self, duration: Duration) {
+        self.sequential_time += duration;
+    }
+
+    fn print_summary(&self, total: Duration) {
+        fn pct(part: Duration, total: Duration) -> f64 {
+            if total.is_zero() {
+                0.0
+            } else {
+                (part.as_secs_f64() / total.as_secs_f64()) * 100.0
+            }
+        }
+
+        let accounted = self.column_time
+            + self.node_time
+            + self.geometry_time
+            + self.edge_time
+            + self.envelope_time;
+        let residual = self.batch_time.saturating_sub(accounted);
+
+        eprintln!("=== Loader Profiler ===");
+        eprintln!(
+            "Total load time: {:.2?} across {} batches / {} rows",
+            total, self.batches, self.rows
+        );
+        eprintln!(
+            "  Column extraction: {:.2?} ({:.1}%)",
+            self.column_time,
+            pct(self.column_time, total)
+        );
+        eprintln!(
+            "  Node inserts: {:.2?} ({:.1}%)",
+            self.node_time,
+            pct(self.node_time, total)
+        );
+        eprintln!(
+            "  Geometry parsing: {:.2?} ({:.1}%)",
+            self.geometry_time,
+            pct(self.geometry_time, total)
+        );
+        eprintln!(
+            "  Edge attribute calc: {:.2?} ({:.1}%)",
+            self.edge_time,
+            pct(self.edge_time, total)
+        );
+        eprintln!(
+            "  Envelope creation: {:.2?} ({:.1}%)",
+            self.envelope_time,
+            pct(self.envelope_time, total)
+        );
+        eprintln!(
+            "  Parallel processing: {:.2?} ({:.1}%)",
+            self.parallel_time,
+            pct(self.parallel_time, total)
+        );
+        eprintln!(
+            "  Sequential mutations: {:.2?} ({:.1}%)",
+            self.sequential_time,
+            pct(self.sequential_time, total)
+        );
+        eprintln!(
+            "  Other batch overhead: {:.2?} ({:.1}%)",
+            residual,
+            pct(residual, total)
+        );
+        eprintln!(
+            "  Spatial index build: {:.2?} ({:.1}%)",
+            self.spatial_time,
+            pct(self.spatial_time, total)
+        );
+        eprintln!("========================");
+    }
 }
 
 /// Returns the expected Arrow schema for road network parquet files.
@@ -136,6 +274,9 @@ where
     // Estimate node count as ~edge count (road networks have roughly equal nodes and edges)
     let node_hint = edge_count_hint;
 
+    #[cfg(feature = "loader_profiler")]
+    let total_start = Instant::now();
+
     let mut network = if edge_count_hint > 0 {
         RoadNetwork::new_with_capacity(node_hint, edge_count_hint)
     } else {
@@ -145,22 +286,61 @@ where
     let mut edge_envelopes: Vec<EdgeEnvelope> = Vec::with_capacity(edge_count_hint);
 
     // Track nodes we've seen to avoid duplicates
-    let mut seen_nodes: HashMap<i64, Point<f64>> = HashMap::with_capacity(node_hint);
+    let mut seen_nodes: AHashMap<i64, Point<f64>> = AHashMap::with_capacity(node_hint);
+
+    #[cfg(feature = "loader_profiler")]
+    let mut profiler = LoaderProfiler::default();
 
     for batch_result in batches {
         let batch = batch_result?;
-        process_batch(&batch, &mut network, &mut edge_envelopes, &mut seen_nodes)?;
+        #[cfg(feature = "loader_profiler")]
+        let batch_start = Instant::now();
+        #[cfg(feature = "loader_profiler")]
+        {
+            process_batch(
+                &batch,
+                &mut network,
+                &mut edge_envelopes,
+                &mut seen_nodes,
+                &mut profiler,
+            )?;
+            profiler.record_batch(batch.num_rows(), batch_start.elapsed());
+        }
+        #[cfg(not(feature = "loader_profiler"))]
+        {
+            process_batch(&batch, &mut network, &mut edge_envelopes, &mut seen_nodes)?;
+        }
     }
 
     // Explicitly drop seen_nodes before R-tree bulk_load to reduce peak memory
     drop(seen_nodes);
 
+    #[cfg(feature = "loader_profiler")]
+    let spatial_start = Instant::now();
+
     let spatial_index = SpatialIndex::new(edge_envelopes);
+
+    #[cfg(feature = "loader_profiler")]
+    profiler.set_spatial_time(spatial_start.elapsed());
 
     // Drop the ID-to-index lookup maps; they are only needed during construction.
     network.compact();
 
+    #[cfg(feature = "loader_profiler")]
+    profiler.print_summary(total_start.elapsed());
+
     Ok((network, spatial_index))
+}
+
+/// Represents a fully-processed edge ready to insert into the graph.
+/// All expensive computations (geometry parsing, FRC/FOW inference, Edge::new) are done.
+struct PendingEdge {
+    edge_id: u64,
+    sv_id: i64,
+    ev_id: i64,
+    sv_coord: Point<f64>,
+    ev_coord: Point<f64>,
+    edge: Edge,
 }
 
 /// Process a single RecordBatch and add its edges to the network.
@@ -168,8 +348,11 @@ fn process_batch(
     batch: &RecordBatch,
     network: &mut RoadNetwork,
     edge_envelopes: &mut Vec<EdgeEnvelope>,
-    seen_nodes: &mut HashMap<i64, Point<f64>>,
+    seen_nodes: &mut AHashMap<i64, Point<f64>>,
+    #[cfg(feature = "loader_profiler")] profiler: &mut LoaderProfiler,
 ) -> Result<()> {
+    #[cfg(feature = "loader_profiler")]
+    let column_start = Instant::now();
     // Extract columns
     let stable_edge_id = batch
         .column_by_name("stableEdgeId")
@@ -212,6 +395,9 @@ fn process_batch(
     // Detect geometry format: WKB (binary), WKT (string), or GeoArrow native
     let geometry_format = detect_geometry_format(batch);
 
+    #[cfg(feature = "loader_profiler")]
+    profiler.add_column_time(column_start.elapsed());
+
     // All required columns must be present (highway can be String or LargeString)
     let (stable_edge_id, start_vertex, end_vertex, start_lat, start_lon, end_lat, end_lon) = match (
         stable_edge_id,
@@ -233,13 +419,16 @@ fn process_batch(
         return Ok(());
     }
 
+    // Pre-scan batch to collect unique node IDs and coordinates (deduplication)
+    // This reduces HashMap operations from 2*num_edges to ~unique_nodes
+    #[cfg(feature = "loader_profiler")]
+    let node_start = Instant::now();
+
+    let mut batch_nodes: AHashMap<i64, Point<f64>> = AHashMap::new();
     for row in 0..batch.num_rows() {
-        // Skip nulls
         if stable_edge_id.is_null(row) || start_vertex.is_null(row) || end_vertex.is_null(row) {
             continue;
         }
-
-        let edge_id = stable_edge_id.value(row);
         let sv_id = start_vertex.value(row);
         let ev_id = end_vertex.value(row);
         let sv_lat = start_lat.value(row);
@@ -247,126 +436,199 @@ fn process_batch(
         let ev_lat = end_lat.value(row);
         let ev_lon = end_lon.value(row);
 
-        // Create nodes if not seen
-        if let std::collections::hash_map::Entry::Vacant(e) = seen_nodes.entry(sv_id) {
-            let coord = Point::new(sv_lon, sv_lat);
+        batch_nodes
+            .entry(sv_id)
+            .or_insert_with(|| Point::new(sv_lon, sv_lat));
+        batch_nodes
+            .entry(ev_id)
+            .or_insert_with(|| Point::new(ev_lon, ev_lat));
+    }
+
+    // Add new nodes to network (only those not seen before)
+    for (node_id, coord) in batch_nodes {
+        if let std::collections::hash_map::Entry::Vacant(e) = seen_nodes.entry(node_id) {
             e.insert(coord);
-            network.add_node(Node { id: sv_id, coord });
+            network.add_node(Node { id: node_id, coord });
         }
-        if let std::collections::hash_map::Entry::Vacant(e) = seen_nodes.entry(ev_id) {
-            let coord = Point::new(ev_lon, ev_lat);
-            e.insert(coord);
-            network.add_node(Node { id: ev_id, coord });
-        }
+    }
 
-        // Parse highway tag for FRC/FOW (handle String, LargeString, and StringView)
-        let hw_tag: &str = if let Some(hw) = highway_string {
-            if hw.is_null(row) {
-                ""
-            } else {
-                hw.value(row)
-            }
-        } else if let Some(hw) = highway_large {
-            if hw.is_null(row) {
-                ""
-            } else {
-                hw.value(row)
-            }
-        } else if let Some(hw) = highway_view {
-            if hw.is_null(row) {
-                ""
-            } else {
-                hw.value(row)
-            }
-        } else {
-            ""
-        };
-        let frc = Frc::from_osm_highway(hw_tag);
+    #[cfg(feature = "loader_profiler")]
+    profiler.add_node_time(node_start.elapsed());
+    #[cfg(feature = "loader_profiler")]
+    profiler.add_node_time(node_start.elapsed());
 
-        let lane_count = lanes.and_then(|l| {
-            if l.is_null(row) {
-                None
-            } else {
-                Some(l.value(row) as u8)
-            }
-        });
-        let fow = Fow::from_osm_tags(hw_tag, None, None, lane_count);
+    // PARALLEL PHASE: Process all rows in parallel (geometry parsing, FRC/FOW, metrics, Edge construction)
+    #[cfg(feature = "loader_profiler")]
+    let parallel_start = Instant::now();
 
-        // Parse geometry based on detected format
-        let fallback = || LineString::from(vec![(sv_lon, sv_lat), (ev_lon, ev_lat)]);
-        let geom: LineString<f64> = match &geometry_format {
-            GeometryFormat::Wkb(source) => {
-                let bytes = match source {
-                    WkbSource::Binary(arr) => {
-                        if arr.is_null(row) {
-                            None
-                        } else {
-                            Some(arr.value(row))
-                        }
-                    }
-                    WkbSource::LargeBinary(arr) => {
-                        if arr.is_null(row) {
-                            None
-                        } else {
-                            Some(arr.value(row))
-                        }
-                    }
-                    WkbSource::BinaryView(arr) => {
-                        if arr.is_null(row) {
-                            None
-                        } else {
-                            Some(arr.value(row))
-                        }
-                    }
-                };
-                bytes
-                    .and_then(parse_wkb_linestring)
-                    .unwrap_or_else(fallback)
+    let pending_edges: Vec<Option<PendingEdge>> = (0..batch.num_rows())
+        .into_par_iter()
+        .map(|row| {
+            // Skip nulls
+            if stable_edge_id.is_null(row) || start_vertex.is_null(row) || end_vertex.is_null(row) {
+                return None;
             }
-            GeometryFormat::Wkt(source) => {
-                let text = match source {
-                    WktSource::String(arr) => {
-                        if arr.is_null(row) {
-                            None
-                        } else {
-                            Some(arr.value(row))
-                        }
-                    }
-                    WktSource::LargeString(arr) => {
-                        if arr.is_null(row) {
-                            None
-                        } else {
-                            Some(arr.value(row))
-                        }
-                    }
-                    WktSource::StringView(arr) => {
-                        if arr.is_null(row) {
-                            None
-                        } else {
-                            Some(arr.value(row))
-                        }
-                    }
-                };
-                text.and_then(parse_wkt_linestring).unwrap_or_else(fallback)
-            }
-            GeometryFormat::GeoArrow(arr) => {
-                if arr.is_null(row) {
-                    fallback()
+
+            let edge_id = stable_edge_id.value(row);
+            let sv_id = start_vertex.value(row);
+            let ev_id = end_vertex.value(row);
+            let sv_lat = start_lat.value(row);
+            let sv_lon = start_lon.value(row);
+            let ev_lat = end_lat.value(row);
+            let ev_lon = end_lon.value(row);
+
+            // Parse highway tag for FRC/FOW (handle String, LargeString, and StringView)
+            let hw_tag: &str = if let Some(hw) = highway_string {
+                if hw.is_null(row) {
+                    ""
                 } else {
-                    parse_geoarrow_linestring(arr, row).unwrap_or_else(fallback)
+                    hw.value(row)
                 }
-            }
-            GeometryFormat::None => fallback(),
-        };
+            } else if let Some(hw) = highway_large {
+                if hw.is_null(row) {
+                    ""
+                } else {
+                    hw.value(row)
+                }
+            } else if let Some(hw) = highway_view {
+                if hw.is_null(row) {
+                    ""
+                } else {
+                    hw.value(row)
+                }
+            } else {
+                ""
+            };
+            let frc = Frc::from_osm_highway(hw_tag);
 
-        // Create edge (move geometry into graph, no clone)
-        let edge = Edge::new(edge_id, geom, frc, fow);
-        let edge_idx = network.add_edge(sv_id, ev_id, edge);
+            let lane_count = lanes.and_then(|l| {
+                if l.is_null(row) {
+                    None
+                } else {
+                    Some(l.value(row) as u8)
+                }
+            });
+            let fow = Fow::from_osm_tags(hw_tag, None, None, lane_count);
+
+            // Parse geometry based on detected format
+            let fallback = || LineString::from(vec![(sv_lon, sv_lat), (ev_lon, ev_lat)]);
+
+            let geom: LineString<f64> = match &geometry_format {
+                GeometryFormat::Wkb(source) => {
+                    let bytes = match source {
+                        WkbSource::Binary(arr) => {
+                            if arr.is_null(row) {
+                                None
+                            } else {
+                                Some(arr.value(row))
+                            }
+                        }
+                        WkbSource::LargeBinary(arr) => {
+                            if arr.is_null(row) {
+                                None
+                            } else {
+                                Some(arr.value(row))
+                            }
+                        }
+                        WkbSource::BinaryView(arr) => {
+                            if arr.is_null(row) {
+                                None
+                            } else {
+                                Some(arr.value(row))
+                            }
+                        }
+                    };
+                    bytes
+                        .and_then(parse_wkb_linestring)
+                        .unwrap_or_else(fallback)
+                }
+                GeometryFormat::Wkt(source) => {
+                    let text = match source {
+                        WktSource::String(arr) => {
+                            if arr.is_null(row) {
+                                None
+                            } else {
+                                Some(arr.value(row))
+                            }
+                        }
+                        WktSource::LargeString(arr) => {
+                            if arr.is_null(row) {
+                                None
+                            } else {
+                                Some(arr.value(row))
+                            }
+                        }
+                        WktSource::StringView(arr) => {
+                            if arr.is_null(row) {
+                                None
+                            } else {
+                                Some(arr.value(row))
+                            }
+                        }
+                    };
+                    text.and_then(parse_wkt_linestring).unwrap_or_else(fallback)
+                }
+                GeometryFormat::GeoArrow(arr) => {
+                    if arr.is_null(row) {
+                        fallback()
+                    } else {
+                        parse_geoarrow_linestring(arr, row).unwrap_or_else(fallback)
+                    }
+                }
+                GeometryFormat::None => fallback(),
+            };
+
+            // Compute metrics during geometry processing (fused pass)
+            let geom_with_metrics = linestring_with_metrics(geom);
+
+            // Create edge with pre-computed metrics (no redundant computation)
+            let edge = Edge::from_precomputed(
+                edge_id,
+                geom_with_metrics.geometry,
+                frc,
+                fow,
+                geom_with_metrics.length_m,
+                geom_with_metrics.bearing_start,
+                geom_with_metrics.bearing_end,
+            );
+
+            Some(PendingEdge {
+                edge_id,
+                sv_id,
+                ev_id,
+                sv_coord: Point::new(sv_lon, sv_lat),
+                ev_coord: Point::new(ev_lon, ev_lat),
+                edge,
+            })
+        })
+        .collect();
+
+    #[cfg(feature = "loader_profiler")]
+    profiler.add_parallel_time(parallel_start.elapsed());
+
+    // SEQUENTIAL PHASE: Insert edges into graph and build envelopes
+    #[cfg(feature = "loader_profiler")]
+    let sequential_start = Instant::now();
+
+    for pending in pending_edges.into_iter().flatten() {
+        // Add edge to graph
+        #[cfg(feature = "loader_profiler")]
+        let edge_start = Instant::now();
+        let edge_idx = network.add_edge(pending.sv_id, pending.ev_id, pending.edge);
+        #[cfg(feature = "loader_profiler")]
+        profiler.add_edge_time(edge_start.elapsed());
 
         // Add to spatial index (borrow geometry from graph)
         let edge_geom = &network.edge(edge_idx).unwrap().geometry;
+        #[cfg(feature = "loader_profiler")]
+        let envelope_start = Instant::now();
         edge_envelopes.push(EdgeEnvelope::new(edge_idx, edge_geom));
+        #[cfg(feature = "loader_profiler")]
+        profiler.add_envelope_time(envelope_start.elapsed());
     }
+
+    #[cfg(feature = "loader_profiler")]
+    profiler.add_sequential_time(sequential_start.elapsed());
 
     Ok(())
 }
@@ -454,6 +716,70 @@ fn extract_linestring(geom: geo::Geometry<f64>) -> Option<LineString<f64>> {
         geo::Geometry::LineString(ls) => Some(ls),
         geo::Geometry::MultiLineString(mls) => mls.0.into_iter().next(),
         _ => None,
+    }
+}
+
+/// Compute edge metrics (length, bearings) from a LineString.
+/// This is optimized to walk coordinates once using Haversine approximation.
+fn compute_metrics_from_linestring(geom: &LineString<f64>) -> (f64, f64, f64) {
+    let coords: Vec<_> = geom.coords().collect();
+    if coords.len() < 2 {
+        return (0.0, 0.0, 0.0);
+    }
+
+    // Compute geodesic length using Haversine formula
+    let mut total_length = 0.0;
+    for i in 0..coords.len() - 1 {
+        let p1 = Point::new(coords[i].x, coords[i].y);
+        let p2 = Point::new(coords[i + 1].x, coords[i + 1].y);
+        total_length += haversine_distance(p1, p2);
+    }
+
+    // Start bearing: from first point toward second
+    let start_bearing =
+        Point::new(coords[0].x, coords[0].y).geodesic_bearing(Point::new(coords[1].x, coords[1].y));
+
+    // End bearing: from second-to-last toward last
+    let n = coords.len();
+    let end_bearing = Point::new(coords[n - 2].x, coords[n - 2].y)
+        .geodesic_bearing(Point::new(coords[n - 1].x, coords[n - 1].y));
+
+    // Normalize to 0-360
+    let normalize = |b: f64| ((b % 360.0) + 360.0) % 360.0;
+
+    (
+        total_length,
+        normalize(start_bearing),
+        normalize(end_bearing),
+    )
+}
+
+/// Fast Haversine distance approximation in meters.
+/// More efficient than full geodesic calculation for our use case.
+#[inline]
+fn haversine_distance(p1: Point<f64>, p2: Point<f64>) -> f64 {
+    const EARTH_RADIUS_M: f64 = 6371000.0; // Earth's radius in meters
+
+    let lat1 = p1.y().to_radians();
+    let lat2 = p2.y().to_radians();
+    let delta_lat = (p2.y() - p1.y()).to_radians();
+    let delta_lon = (p2.x() - p1.x()).to_radians();
+
+    let a =
+        (delta_lat / 2.0).sin().powi(2) + lat1.cos() * lat2.cos() * (delta_lon / 2.0).sin().powi(2);
+    let c = 2.0 * a.sqrt().atan2((1.0 - a).sqrt());
+
+    EARTH_RADIUS_M * c
+}
+
+/// Wrap a LineString with pre-computed metrics.
+fn linestring_with_metrics(geom: LineString<f64>) -> GeometryWithMetrics {
+    let (length_m, bearing_start, bearing_end) = compute_metrics_from_linestring(&geom);
+    GeometryWithMetrics {
+        geometry: geom,
+        length_m,
+        bearing_start,
+        bearing_end,
     }
 }
 
