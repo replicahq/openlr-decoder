@@ -54,10 +54,10 @@ fn bounded_astar(
     goal_coord: Point<f64>,
     max_cost: f64,
     max_frc: Option<Frc>,
-) -> Option<(f64, Vec<NodeIndex>)> {
+) -> Option<(f64, Vec<NodeIndex>, Vec<EdgeIndex>)> {
     let mut open_set = BinaryHeap::new();
     let mut g_scores: HashMap<NodeIndex, f64> = HashMap::new();
-    let mut came_from: HashMap<NodeIndex, NodeIndex> = HashMap::new();
+    let mut came_from: HashMap<NodeIndex, (NodeIndex, EdgeIndex)> = HashMap::new();
 
     // Initialize with start node
     let start_h = network
@@ -76,14 +76,17 @@ fn bounded_astar(
         // Found the goal
         if current.node == goal {
             // Reconstruct path
-            let mut path = vec![goal];
+            let mut nodes = vec![goal];
+            let mut edges = Vec::new();
             let mut node = goal;
-            while let Some(&prev) = came_from.get(&node) {
-                path.push(prev);
+            while let Some(&(prev, edge_idx)) = came_from.get(&node) {
+                nodes.push(prev);
+                edges.push(edge_idx);
                 node = prev;
             }
-            path.reverse();
-            return Some((current.g_score, path));
+            nodes.reverse();
+            edges.reverse();
+            return Some((current.g_score, nodes, edges));
         }
 
         // Skip if we've already found a better path to this node
@@ -127,7 +130,7 @@ fn bounded_astar(
             }
 
             // This is a better path
-            came_from.insert(neighbor, current.node);
+            came_from.insert(neighbor, (current.node, edge.id()));
             g_scores.insert(neighbor, tentative_g);
 
             let h = network
@@ -705,22 +708,20 @@ impl<'a> Decoder<'a> {
                 let start_cand = &start_candidates[start_idx];
                 let end_cand = &end_candidates[end_idx];
 
-                // Check if end candidate's edge respects LFRCNP constraint
+                // Check if start/end edges respect LFRCNP constraint
                 // This prevents routing to lower-class roads (e.g., residential when LFRCNP=3)
-                let end_edge_frc = self
-                    .network
-                    .edge(end_cand.edge_idx)
-                    .map(|e| e.frc)
-                    .unwrap_or(Frc::Frc7);
-                let end_edge_fow = self
-                    .network
-                    .edge(end_cand.edge_idx)
-                    .map(|e| e.fow)
-                    .unwrap_or(Fow::Other);
+                let (start_edge, end_edge) = match (
+                    self.network.edge(start_cand.edge_idx),
+                    self.network.edge(end_cand.edge_idx),
+                ) {
+                    (Some(s), Some(e)) => (s, e),
+                    _ => continue,
+                };
 
-                // Apply LFRCNP to end candidate
+                // Apply LFRCNP to the partial edges connected to the LRPs
                 // SlipRoads are always allowed (they connect different road classes)
-                let is_slip_road = end_edge_fow == Fow::SlipRoad;
+                let start_is_slip_road = start_edge.fow == Fow::SlipRoad;
+                let end_is_slip_road = end_edge.fow == Fow::SlipRoad;
                 let max_allowed_frc = match (lfrcnp, use_relaxed_lfrcnp) {
                     (Some(frc), false) => frc,                                        // Strict
                     (Some(frc), true) => Frc::from_u8((frc as u8).saturating_add(1)), // Relaxed +1
@@ -728,7 +729,10 @@ impl<'a> Decoder<'a> {
                 };
 
                 // Skip candidates that don't respect current LFRCNP threshold
-                if end_edge_frc > max_allowed_frc && !is_slip_road {
+                if start_edge.frc > max_allowed_frc && !start_is_slip_road {
+                    continue;
+                }
+                if end_edge.frc > max_allowed_frc && !end_is_slip_road {
                     continue;
                 }
 
@@ -799,16 +803,9 @@ impl<'a> Decoder<'a> {
                 // Calculate partial edge lengths to add to path cost
                 // Start edge: from projection point to target = (1 - fraction) * length
                 // End edge: from source to projection point = fraction * length
-                let start_edge_partial = self
-                    .network
-                    .edge(start_cand.edge_idx)
-                    .map(|e| e.length_m * (1.0 - start_cand.projection_fraction))
-                    .unwrap_or(0.0);
-                let end_edge_partial = self
-                    .network
-                    .edge(end_cand.edge_idx)
-                    .map(|e| e.length_m * end_cand.projection_fraction)
-                    .unwrap_or(0.0);
+                let start_edge_partial =
+                    start_edge.length_m * (1.0 - start_cand.projection_fraction);
+                let end_edge_partial = end_edge.length_m * end_cand.projection_fraction;
 
                 // Adjust max search for the middle path portion
                 let middle_max = max_search_distance - start_edge_partial - end_edge_partial;
@@ -826,9 +823,9 @@ impl<'a> Decoder<'a> {
                     lfrcnp
                 };
 
-                let (middle_cost, path_nodes) = if start_node == end_node {
+                let (middle_cost, _path_nodes, middle_edges) = if start_node == end_node {
                     // Start and end edges share a node - no middle path needed
-                    (0.0, vec![start_node])
+                    (0.0, vec![start_node], Vec::new())
                 } else {
                     match bounded_astar(
                         self.network,
@@ -867,7 +864,6 @@ impl<'a> Decoder<'a> {
                 }
 
                 // Add middle edges with their full lengths
-                let middle_edges = self.nodes_to_edges(&path_nodes);
                 for &edge_idx in &middle_edges {
                     if let Some(edge) = self.network.edge(edge_idx) {
                         edges.push(edge_idx);
@@ -917,30 +913,12 @@ impl<'a> Decoder<'a> {
             to: lrp_index + 1,
         })
     }
-
-    /// Convert a sequence of nodes to the edges connecting them
-    fn nodes_to_edges(&self, nodes: &[NodeIndex]) -> Vec<EdgeIndex> {
-        let mut edges = Vec::with_capacity(nodes.len().saturating_sub(1));
-
-        for i in 0..nodes.len().saturating_sub(1) {
-            // Find edge between consecutive nodes
-            if let Some(edge_ref) = self
-                .network
-                .graph
-                .edges_connecting(nodes[i], nodes[i + 1])
-                .next()
-            {
-                edges.push(edge_ref.id());
-            }
-        }
-
-        edges
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::candidates::Candidate;
     use crate::graph::{Fow, Frc};
     use crate::test_utils::TestNetworkBuilder;
 
@@ -948,6 +926,87 @@ mod tests {
     fn test_decoder_config_defaults() {
         let config = DecoderConfig::default();
         assert_eq!(config.length_tolerance, 0.35);
+    }
+
+    #[test]
+    fn test_find_best_path_prefers_allowed_start_edge() {
+        let (network, spatial) = TestNetworkBuilder::new()
+            .add_node(1, 0.0, 0.0)
+            .add_node(2, 0.0, 0.001)
+            .add_node(3, 0.0, 0.002)
+            .add_edge(100, 1, 2, 20.0, Frc::Frc4, Fow::SingleCarriageway) // Service road
+            .add_edge(101, 1, 2, 20.0, Frc::Frc3, Fow::SingleCarriageway) // Secondary
+            .add_edge(102, 2, 3, 20.0, Frc::Frc3, Fow::SingleCarriageway)
+            .build();
+
+        let decoder = Decoder::new(&network, &spatial);
+
+        let service_edge_idx = *network
+            .edge_id_to_index
+            .as_ref()
+            .unwrap()
+            .get(&100)
+            .unwrap();
+        let secondary_edge_idx = *network
+            .edge_id_to_index
+            .as_ref()
+            .unwrap()
+            .get(&101)
+            .unwrap();
+        let end_edge_idx = *network
+            .edge_id_to_index
+            .as_ref()
+            .unwrap()
+            .get(&102)
+            .unwrap();
+
+        let service_candidate = Candidate {
+            edge_idx: service_edge_idx,
+            distance_m: 0.0,
+            bearing_diff: 0.0,
+            frc_diff: 0,
+            fow_score: 1.0,
+            score: 0.1, // Would normally be preferred without LFRCNP filter
+            projection_fraction: 0.0,
+        };
+        let allowed_candidate = Candidate {
+            edge_idx: secondary_edge_idx,
+            distance_m: 0.0,
+            bearing_diff: 0.0,
+            frc_diff: 0,
+            fow_score: 1.0,
+            score: 1.0,
+            projection_fraction: 0.0,
+        };
+        let end_candidate = Candidate {
+            edge_idx: end_edge_idx,
+            distance_m: 0.0,
+            bearing_diff: 0.0,
+            frc_diff: 0,
+            fow_score: 1.0,
+            score: 0.0,
+            projection_fraction: 0.5,
+        };
+
+        let start_candidates = vec![service_candidate, allowed_candidate];
+        let end_candidates = vec![end_candidate];
+
+        let result = decoder
+            .find_best_path(&start_candidates, &end_candidates, 30.0, 0, Some(Frc::Frc3))
+            .expect("Secondary road should satisfy LFRCNP");
+
+        assert!(
+            result.edges.contains(&secondary_edge_idx),
+            "Path should include the allowed FRC3 edge"
+        );
+        assert!(
+            !result.edges.contains(&service_edge_idx),
+            "Service road must be filtered out when LFRCNP=FRC3"
+        );
+        assert!(
+            (result.total_length - 30.0).abs() < 1e-6,
+            "Path length should match the partial traversals"
+        );
     }
 
     // =========================================================================
@@ -984,14 +1043,14 @@ mod tests {
 
         assert!(result.is_some(), "Should find a valid path within max_cost");
 
-        let (cost, path) = result.unwrap();
+        let (cost, nodes, _edges) = result.unwrap();
         assert_eq!(
-            path.len(),
+            nodes.len(),
             3,
             "Path should have 3 nodes: start, middle, goal"
         );
-        assert_eq!(path[0], start);
-        assert_eq!(path[2], goal);
+        assert_eq!(nodes[0], start);
+        assert_eq!(nodes[2], goal);
         assert!(
             (cost - 250.0).abs() < 1.0,
             "Path cost should be ~250m, got {}",
@@ -1047,7 +1106,7 @@ mod tests {
         let result = bounded_astar(&network, start, goal, goal_coord, 1000.0, None);
         assert!(result.is_some());
 
-        let (cost, path) = result.unwrap();
+        let (cost, nodes, _edges) = result.unwrap();
 
         // Expected total: 172 + 90 + 50 = 312m
         assert!(
@@ -1055,7 +1114,7 @@ mod tests {
             "Path cost should be 312m, got {}",
             cost
         );
-        assert_eq!(path.len(), 4, "Path should traverse all 4 nodes");
+        assert_eq!(nodes.len(), 4, "Path should traverse all 4 nodes");
     }
 
     /// Test bounded_astar with branching paths (chooses shortest)
@@ -1093,7 +1152,7 @@ mod tests {
         let result = bounded_astar(&network, start, goal, goal_coord, 500.0, None);
         assert!(result.is_some());
 
-        let (cost, path) = result.unwrap();
+        let (cost, nodes, _edges) = result.unwrap();
 
         // A* should find the shorter 200m path via node 2
         assert!(
@@ -1101,13 +1160,47 @@ mod tests {
             "Should find shortest path (200m), got {}m",
             cost
         );
-        assert_eq!(path.len(), 3, "Shortest path has 3 nodes");
+        assert_eq!(nodes.len(), 3, "Shortest path has 3 nodes");
 
         // Verify it went through node 2, not node 3
         let node2_idx = *network.node_id_to_index.as_ref().unwrap().get(&2).unwrap();
         assert!(
-            path.contains(&node2_idx),
+            nodes.contains(&node2_idx),
             "Path should go through node 2 (shorter route)"
+        );
+    }
+
+    #[test]
+    fn test_bounded_astar_returns_actual_edge_sequence() {
+        // Parallel edges between the same nodes (one allowed, one filtered)
+        let (network, _) = TestNetworkBuilder::new()
+            .add_node(1, 0.0, 0.0)
+            .add_node(2, 0.0, 0.001)
+            .add_node(3, 0.0, 0.002)
+            // Allowed secondary edge
+            .add_edge(100, 1, 2, 20.0, Frc::Frc3, Fow::SingleCarriageway)
+            // Disallowed service edge between same nodes
+            .add_edge(101, 1, 2, 20.0, Frc::Frc4, Fow::SingleCarriageway)
+            // Downstream edge to reach goal
+            .add_edge(102, 2, 3, 20.0, Frc::Frc3, Fow::SingleCarriageway)
+            .build();
+
+        let start = *network.node_id_to_index.as_ref().unwrap().get(&1).unwrap();
+        let goal = *network.node_id_to_index.as_ref().unwrap().get(&3).unwrap();
+        let goal_coord = network.node(goal).unwrap().coord;
+
+        let result =
+            bounded_astar(&network, start, goal, goal_coord, 200.0, Some(Frc::Frc3)).unwrap();
+        let (_, _, edges) = result;
+        let edge_ids: Vec<u64> = edges
+            .iter()
+            .filter_map(|idx| network.edge(*idx).map(|e| e.id))
+            .collect();
+
+        assert_eq!(
+            edge_ids,
+            vec![100, 102],
+            "A* should return the actual traversed edges respecting LFRCNP"
         );
     }
 
@@ -1127,10 +1220,10 @@ mod tests {
         let result = bounded_astar(&network, start, goal, goal_coord, 100.0, None);
         assert!(result.is_some());
 
-        let (cost, path) = result.unwrap();
+        let (cost, nodes, _edges) = result.unwrap();
         assert_eq!(cost, 0.0, "Cost to same node should be 0");
-        assert_eq!(path.len(), 1, "Path to same node should have 1 element");
-        assert_eq!(path[0], start);
+        assert_eq!(nodes.len(), 1, "Path to same node should have 1 element");
+        assert_eq!(nodes[0], start);
     }
 
     /// Test bounded_astar with disconnected nodes
@@ -1194,7 +1287,7 @@ mod tests {
         // Without LFRCNP: should find shorter path via node 3 (150m)
         let result_no_filter = bounded_astar(&network, start, goal, goal_coord, 500.0, None);
         assert!(result_no_filter.is_some());
-        let (cost_no_filter, _) = result_no_filter.unwrap();
+        let (cost_no_filter, _, _) = result_no_filter.unwrap();
         assert!(
             (cost_no_filter - 150.0).abs() < 1.0,
             "Without LFRCNP, should find shorter 150m path, got {}m",
@@ -1208,7 +1301,7 @@ mod tests {
             result_filtered.is_some(),
             "Should find path via high-importance roads"
         );
-        let (cost_filtered, path) = result_filtered.unwrap();
+        let (cost_filtered, nodes, _edges) = result_filtered.unwrap();
         assert!(
             (cost_filtered - 200.0).abs() < 1.0,
             "With LFRCNP=FRC2, should find 200m path via FRC1 roads, got {}m",
@@ -1218,9 +1311,9 @@ mod tests {
         // Verify path went through node 2 (high importance), not node 3 (low importance)
         let node2_idx = *network.node_id_to_index.as_ref().unwrap().get(&2).unwrap();
         let node3_idx = *network.node_id_to_index.as_ref().unwrap().get(&3).unwrap();
-        assert!(path.contains(&node2_idx), "Path should go through node 2");
+        assert!(nodes.contains(&node2_idx), "Path should go through node 2");
         assert!(
-            !path.contains(&node3_idx),
+            !nodes.contains(&node3_idx),
             "Path should NOT go through node 3"
         );
     }
@@ -1247,7 +1340,7 @@ mod tests {
         // With LFRCNP = FRC7, even the lowest importance roads should be allowed
         let result = bounded_astar(&network, start, goal, goal_coord, 500.0, Some(Frc::Frc7));
         assert!(result.is_some());
-        let (cost, _) = result.unwrap();
+        let (cost, _, _) = result.unwrap();
         assert!(
             (cost - 150.0).abs() < 1.0,
             "LFRCNP=FRC7 should allow FRC7 roads, finding 150m path, got {}m",
