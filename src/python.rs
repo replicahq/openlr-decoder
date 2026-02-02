@@ -134,6 +134,18 @@ pub struct PyDecoderConfig {
     /// Maximum search distance factor
     #[pyo3(get, set)]
     pub max_search_distance_factor: f64,
+    /// Scoring weight for distance (higher = distance matters more)
+    #[pyo3(get, set)]
+    pub distance_weight: f64,
+    /// Scoring weight for bearing difference
+    #[pyo3(get, set)]
+    pub bearing_weight: f64,
+    /// Scoring weight for FRC difference
+    #[pyo3(get, set)]
+    pub frc_weight: f64,
+    /// Scoring weight for FOW compatibility
+    #[pyo3(get, set)]
+    pub fow_weight: f64,
 }
 
 #[pymethods]
@@ -149,7 +161,11 @@ impl PyDecoderConfig {
         max_candidate_distance_m = 35.0,
         length_tolerance = 0.35,
         absolute_length_tolerance = 100.0,
-        max_search_distance_factor = 2.0
+        max_search_distance_factor = 2.0,
+        distance_weight = 10.0,
+        bearing_weight = 0.2,
+        frc_weight = 0.1,
+        fow_weight = 0.1
     ))]
     fn new(
         search_radius_m: f64,
@@ -160,6 +176,10 @@ impl PyDecoderConfig {
         length_tolerance: f64,
         absolute_length_tolerance: f64,
         max_search_distance_factor: f64,
+        distance_weight: f64,
+        bearing_weight: f64,
+        frc_weight: f64,
+        fow_weight: f64,
     ) -> Self {
         PyDecoderConfig {
             search_radius_m,
@@ -170,6 +190,10 @@ impl PyDecoderConfig {
             length_tolerance,
             absolute_length_tolerance,
             max_search_distance_factor,
+            distance_weight,
+            bearing_weight,
+            frc_weight,
+            fow_weight,
         }
     }
 
@@ -177,7 +201,8 @@ impl PyDecoderConfig {
         format!(
             "DecoderConfig(search_radius_m={}, max_bearing_diff={}, frc_tolerance={}, \
              max_candidates={}, max_candidate_distance_m={}, length_tolerance={}, \
-             absolute_length_tolerance={}, max_search_distance_factor={})",
+             absolute_length_tolerance={}, max_search_distance_factor={}, \
+             distance_weight={}, bearing_weight={}, frc_weight={}, fow_weight={})",
             self.search_radius_m,
             self.max_bearing_diff,
             self.frc_tolerance,
@@ -185,7 +210,11 @@ impl PyDecoderConfig {
             self.max_candidate_distance_m,
             self.length_tolerance,
             self.absolute_length_tolerance,
-            self.max_search_distance_factor
+            self.max_search_distance_factor,
+            self.distance_weight,
+            self.bearing_weight,
+            self.frc_weight,
+            self.fow_weight
         )
     }
 }
@@ -199,7 +228,10 @@ impl From<&PyDecoderConfig> for DecoderConfig {
                 frc_tolerance: config.frc_tolerance,
                 max_candidates: config.max_candidates,
                 max_candidate_distance_m: config.max_candidate_distance_m,
-                ..CandidateConfig::default()
+                distance_weight: config.distance_weight,
+                bearing_weight: config.bearing_weight,
+                frc_weight: config.frc_weight,
+                fow_weight: config.fow_weight,
             },
             length_tolerance: config.length_tolerance,
             absolute_length_tolerance: config.absolute_length_tolerance,
