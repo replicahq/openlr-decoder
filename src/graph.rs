@@ -4,19 +4,19 @@ use petgraph::visit::EdgeRef;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Functional Road Class — aligned with HERE's 5-level Functional Class (FC1–FC5).
+/// Functional Road Class — OpenLR binary values (0–7) that represent road importance.
 ///
-/// HERE only uses FC1–FC5, which map to FRC0–FRC4. HERE-encoded OpenLR codes
-/// will never contain FRC5, FRC6, or FRC7. Those values exist in the OpenLR
-/// binary spec (3 bits = 0–7) but are unused by HERE.
+/// HERE uses a 5-level classification (FC1–FC5, where FC1 is highest importance).
+/// OpenLR encodes these as 0-indexed values: Frc0=FC1, Frc1=FC2, ..., Frc4=FC5.
+/// Values Frc5–Frc7 exist in the OpenLR spec (3 bits = 0–7) but are unused by HERE.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum Frc {
-    Frc0 = 0, // HERE FC1: Major highways / interstates (highest importance)
-    Frc1 = 1, // HERE FC2: Primary routes between / through cities
-    Frc2 = 2, // HERE FC3: Secondary routes between minor cities / towns
-    Frc3 = 3, // HERE FC4: Local connecting routes between villages
-    Frc4 = 4, // HERE FC5: Local / neighborhood roads (lowest importance)
+    Frc0 = 0, // Highest importance: motorways, controlled-access highways (HERE: FC1)
+    Frc1 = 1, // Major routes for travel between/through cities (HERE: FC2)
+    Frc2 = 2, // High volume roads interconnecting with major routes (HERE: FC3)
+    Frc3 = 3, // Moderate speed roads between neighborhoods (HERE: FC4)
+    Frc4 = 4, // Lowest importance: local/residential roads (HERE: FC5)
     Frc5 = 5, // Not used by HERE
     Frc6 = 6, // Not used by HERE
     Frc7 = 7, // Not used by HERE
@@ -36,27 +36,27 @@ impl Frc {
         }
     }
 
-    /// Map OSM highway tag to HERE-equivalent FRC.
+    /// Map OSM highway tag to OpenLR FRC value.
     ///
-    /// HERE uses 5 functional classes (FC1–FC5) mapped to FRC0–FRC4.
-    /// All navigable OSM roads must map into this range so they can match
-    /// HERE-encoded OpenLR location reference points.
+    /// Maps OSM road types to the 0-indexed FRC values used in OpenLR binary format.
+    /// These correspond to HERE's FC1–FC5 importance levels (Frc0=FC1 ... Frc4=FC5).
+    /// All navigable OSM roads must map into the Frc0–Frc4 range to match HERE-encoded LRPs.
     pub fn from_osm_highway(highway: &str) -> Self {
         match highway {
-            // FC1 → FRC0: Major highways, interstates
+            // Frc0: Controlled-access highways (highest importance)
             "motorway" => Frc::Frc0,
-            // FC2 → FRC1: Primary routes between/through cities
+            // Frc1: Major routes for inter-city travel
             "trunk" => Frc::Frc1,
-            // FC3 → FRC2: Secondary routes between minor cities/towns
+            // Frc2: High volume roads interconnecting with major routes
             "primary" => Frc::Frc2,
-            // FC4 → FRC3: Local connecting routes
+            // Frc3: Moderate speed roads connecting neighborhoods
             "secondary" => Frc::Frc3,
             "motorway_link" | "trunk_link" | "primary_link" => Frc::Frc3,
-            // FC5 → FRC4: Local / neighborhood roads (lowest in HERE's hierarchy)
+            // Frc4: Local/residential roads (lowest importance)
             "tertiary" | "secondary_link" | "tertiary_link" | "unclassified" | "residential"
             | "living_street" | "service" | "track" => Frc::Frc4,
-            // Not in HERE's network — use FRC7 so these edges are unlikely to
-            // match any HERE-encoded LRP (outside ±2 tolerance from FRC0–4)
+            // Not in HERE's network — use Frc7 so these edges won't match
+            // HERE-encoded LRPs (outside ±2 tolerance from Frc0–Frc4)
             _ => Frc::Frc7,
         }
     }
