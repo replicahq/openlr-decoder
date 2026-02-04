@@ -174,10 +174,14 @@ pub struct DecodedPath {
     pub edge_ids: Vec<u64>,
     /// Total path length in meters
     pub length_m: f64,
-    /// Positive offset (trim from start) in meters
+    /// Distance from start of first edge to first LRP projection (trim from start) in meters
     pub positive_offset_m: f64,
-    /// Negative offset (trim from end) in meters
+    /// Distance from last LRP projection to end of last edge (trim from end) in meters
     pub negative_offset_m: f64,
+    /// Fraction along first edge where first LRP projects (0.0-1.0)
+    pub positive_offset_fraction: f64,
+    /// Fraction along last edge where last LRP projects (0.0-1.0, measured from end)
+    pub negative_offset_fraction: f64,
     /// The edge ID that covers the most distance in the decoded path
     pub primary_edge_id: u64,
     /// The distance covered by the primary edge in meters
@@ -400,15 +404,57 @@ impl<'a> Decoder<'a> {
             .map(|e| e.id)
             .unwrap_or(0);
 
-        // Extract offsets - convert from fractions (0.0-1.0) to meters
-        let positive_offset_m = line.offsets.pos.range() * total_length;
-        let negative_offset_m = line.offsets.neg.range() * total_length;
+        // Compute offsets by projecting LRP coordinates onto first/last decoded edges
+        // This tells us how much of the decoded path extends beyond the LRP coordinates
+        let (
+            positive_offset_m,
+            negative_offset_m,
+            positive_offset_fraction,
+            negative_offset_fraction,
+        ) = if !full_path.is_empty() {
+            let first_lrp_coord = Point::new(points[0].coordinate.lon, points[0].coordinate.lat);
+            let last_lrp_coord = Point::new(
+                points[points.len() - 1].coordinate.lon,
+                points[points.len() - 1].coordinate.lat,
+            );
+
+            let first_edge_idx = full_path[0];
+            let last_edge_idx = full_path[full_path.len() - 1];
+
+            let (pos_offset_m, pos_frac) =
+                if let Some(first_edge) = self.network.edge(first_edge_idx) {
+                    let frac = crate::spatial::project_point_to_line_fraction(
+                        first_lrp_coord,
+                        &first_edge.geometry,
+                    );
+                    (first_edge.length_m * frac, frac)
+                } else {
+                    (0.0, 0.0)
+                };
+
+            let (neg_offset_m, neg_frac) = if let Some(last_edge) = self.network.edge(last_edge_idx)
+            {
+                let frac = crate::spatial::project_point_to_line_fraction(
+                    last_lrp_coord,
+                    &last_edge.geometry,
+                );
+                (last_edge.length_m * (1.0 - frac), 1.0 - frac)
+            } else {
+                (0.0, 0.0)
+            };
+
+            (pos_offset_m, neg_offset_m, pos_frac, neg_frac)
+        } else {
+            (0.0, 0.0, 0.0, 0.0)
+        };
 
         Ok(DecodedPath {
             edge_ids: self.edge_indices_to_ids(&full_path),
             length_m: total_length,
             positive_offset_m,
             negative_offset_m,
+            positive_offset_fraction,
+            negative_offset_fraction,
             primary_edge_id,
             primary_edge_coverage_m: primary_coverage,
         })
@@ -510,14 +556,53 @@ impl<'a> Decoder<'a> {
             .map(|e| e.id)
             .unwrap_or(0);
 
-        // Convert offset from fraction (0.0-1.0) to meters
-        let positive_offset_m = pal.offset.range() * path_result.total_length;
+        // Compute offsets by projecting LRP coordinates onto first/last decoded edges
+        let (
+            positive_offset_m,
+            negative_offset_m,
+            positive_offset_fraction,
+            negative_offset_fraction,
+        ) = if !path_result.edges.is_empty() {
+            let first_lrp_coord = Point::new(points[0].coordinate.lon, points[0].coordinate.lat);
+            let last_lrp_coord = Point::new(points[1].coordinate.lon, points[1].coordinate.lat);
+
+            let first_edge_idx = path_result.edges[0];
+            let last_edge_idx = path_result.edges[path_result.edges.len() - 1];
+
+            let (pos_offset_m, pos_frac) =
+                if let Some(first_edge) = self.network.edge(first_edge_idx) {
+                    let frac = crate::spatial::project_point_to_line_fraction(
+                        first_lrp_coord,
+                        &first_edge.geometry,
+                    );
+                    (first_edge.length_m * frac, frac)
+                } else {
+                    (0.0, 0.0)
+                };
+
+            let (neg_offset_m, neg_frac) = if let Some(last_edge) = self.network.edge(last_edge_idx)
+            {
+                let frac = crate::spatial::project_point_to_line_fraction(
+                    last_lrp_coord,
+                    &last_edge.geometry,
+                );
+                (last_edge.length_m * (1.0 - frac), 1.0 - frac)
+            } else {
+                (0.0, 0.0)
+            };
+
+            (pos_offset_m, neg_offset_m, pos_frac, neg_frac)
+        } else {
+            (0.0, 0.0, 0.0, 0.0)
+        };
 
         Ok(DecodedPath {
             edge_ids: self.edge_indices_to_ids(&path_result.edges),
             length_m: path_result.total_length,
             positive_offset_m,
-            negative_offset_m: 0.0,
+            negative_offset_m,
+            positive_offset_fraction,
+            negative_offset_fraction,
             primary_edge_id,
             primary_edge_coverage_m: primary_coverage,
         })

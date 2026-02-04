@@ -249,12 +249,18 @@ pub struct PyDecodedPath {
     /// Total path length in meters
     #[pyo3(get)]
     pub length: f64,
-    /// Positive offset (trim from start) in meters
+    /// Distance from start of first edge to first LRP projection (trim from start) in meters
     #[pyo3(get)]
     pub positive_offset: f64,
-    /// Negative offset (trim from end) in meters
+    /// Distance from last LRP projection to end of last edge (trim from end) in meters
     #[pyo3(get)]
     pub negative_offset: f64,
+    /// Fraction along first edge where first LRP projects (0.0-1.0)
+    #[pyo3(get)]
+    pub positive_offset_fraction: f64,
+    /// Fraction along last edge where last LRP projects (0.0-1.0, measured from end)
+    #[pyo3(get)]
+    pub negative_offset_fraction: f64,
     /// The edge ID that covers the most distance in the decoded path
     #[pyo3(get)]
     pub primary_edge_id: u64,
@@ -285,6 +291,8 @@ impl From<DecodedPath> for PyDecodedPath {
             length: path.length_m,
             positive_offset: path.positive_offset_m,
             negative_offset: path.negative_offset_m,
+            positive_offset_fraction: path.positive_offset_fraction,
+            negative_offset_fraction: path.negative_offset_fraction,
             primary_edge_id: path.primary_edge_id,
             primary_edge_coverage: path.primary_edge_coverage_m,
         }
@@ -346,8 +354,10 @@ impl PyDecoder {
     ///     PyArrow RecordBatch with columns:
     ///     - edge_ids: list<uint64> - edge IDs for each decoded path
     ///     - length: float64 - path length in meters
-    ///     - positive_offset: float64 - positive offset in meters
-    ///     - negative_offset: float64 - negative offset in meters
+    ///     - positive_offset: float64 - distance from first edge start to first LRP projection (meters)
+    ///     - negative_offset: float64 - distance from last LRP projection to last edge end (meters)
+    ///     - positive_offset_fraction: float64 - fraction along first edge where first LRP projects (0-1)
+    ///     - negative_offset_fraction: float64 - fraction along last edge from last LRP to edge end (0-1)
     ///     - primary_edge_id: uint64 - edge ID covering the most distance
     ///     - primary_edge_coverage: float64 - distance covered by primary edge in meters
     ///     - error: string (nullable) - error message if decode failed, null if succeeded
@@ -372,6 +382,8 @@ impl PyDecoder {
         let mut length_builder = Float64Builder::new();
         let mut pos_offset_builder = Float64Builder::new();
         let mut neg_offset_builder = Float64Builder::new();
+        let mut pos_offset_frac_builder = Float64Builder::new();
+        let mut neg_offset_frac_builder = Float64Builder::new();
         let mut primary_edge_id_builder = UInt64Builder::new();
         let mut primary_edge_coverage_builder = Float64Builder::new();
         let mut error_builder = StringBuilder::new();
@@ -389,6 +401,8 @@ impl PyDecoder {
                     length_builder.append_value(path.length_m);
                     pos_offset_builder.append_value(path.positive_offset_m);
                     neg_offset_builder.append_value(path.negative_offset_m);
+                    pos_offset_frac_builder.append_value(path.positive_offset_fraction);
+                    neg_offset_frac_builder.append_value(path.negative_offset_fraction);
                     primary_edge_id_builder.append_value(path.primary_edge_id);
                     primary_edge_coverage_builder.append_value(path.primary_edge_coverage_m);
                     error_builder.append_null();
@@ -399,6 +413,8 @@ impl PyDecoder {
                     length_builder.append_null();
                     pos_offset_builder.append_null();
                     neg_offset_builder.append_null();
+                    pos_offset_frac_builder.append_null();
+                    neg_offset_frac_builder.append_null();
                     primary_edge_id_builder.append_null();
                     primary_edge_coverage_builder.append_null();
                     error_builder.append_value(decode_error_message(e));
@@ -410,6 +426,8 @@ impl PyDecoder {
         let length: ArrayRef = Arc::new(length_builder.finish());
         let positive_offset: ArrayRef = Arc::new(pos_offset_builder.finish());
         let negative_offset: ArrayRef = Arc::new(neg_offset_builder.finish());
+        let positive_offset_fraction: ArrayRef = Arc::new(pos_offset_frac_builder.finish());
+        let negative_offset_fraction: ArrayRef = Arc::new(neg_offset_frac_builder.finish());
         let primary_edge_id: ArrayRef = Arc::new(primary_edge_id_builder.finish());
         let primary_edge_coverage: ArrayRef = Arc::new(primary_edge_coverage_builder.finish());
         let error: ArrayRef = Arc::new(error_builder.finish());
@@ -419,6 +437,8 @@ impl PyDecoder {
             ("length", length),
             ("positive_offset", positive_offset),
             ("negative_offset", negative_offset),
+            ("positive_offset_fraction", positive_offset_fraction),
+            ("negative_offset_fraction", negative_offset_fraction),
             ("primary_edge_id", primary_edge_id),
             ("primary_edge_coverage", primary_edge_coverage),
             ("error", error),
