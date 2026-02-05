@@ -618,8 +618,10 @@ mod tests {
     #[test]
     fn test_frc_highway_mapping() {
         assert_eq!(Frc::from_osm_highway("motorway"), Frc::Frc0);
-        // Residential is deprioritized to Frc5
+        assert_eq!(Frc::from_osm_highway("tertiary"), Frc::Frc4);
+        // Access/local roads are deprioritized to Frc5
         assert_eq!(Frc::from_osm_highway("residential"), Frc::Frc5);
+        assert_eq!(Frc::from_osm_highway("service"), Frc::Frc5);
     }
 
     #[test]
