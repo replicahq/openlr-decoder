@@ -788,12 +788,31 @@ impl<'a> Decoder<'a> {
         let mut best_path: Option<PathResult> = None;
         let mut best_score = f64::MAX;
 
+        // Track whether any candidate edges are only available in the relaxed LFRCNP pass.
+        // This allows residential/access roads (now mapped to Frc5) to be reconsidered
+        // even when a stricter Frc4 path exists nearby.
+        let mut needs_relaxed_pass = false;
+        if let Some(strict_limit) = lfrcnp {
+            let relaxed_limit = Frc::from_u8((strict_limit as u8).saturating_add(1));
+            if relaxed_limit > strict_limit {
+                for candidate in start_candidates.iter().chain(end_candidates.iter()) {
+                    if let Some(edge) = self.network.edge(candidate.edge_idx) {
+                        let is_slip = edge.fow == Fow::SlipRoad;
+                        if !is_slip && edge.frc > strict_limit && edge.frc <= relaxed_limit {
+                            needs_relaxed_pass = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
         // Two-pass approach for LFRCNP: try strict first, then fallback to relaxed
         // This prevents mixing valid FRC edges with invalid ones (e.g., taking a
         // residential detour when a primary road path exists within LFRCNP)
         for use_relaxed_lfrcnp in [false, true] {
             // If we found a path in strict pass, skip relaxed pass
-            if use_relaxed_lfrcnp && best_path.is_some() {
+            if use_relaxed_lfrcnp && best_path.is_some() && !needs_relaxed_pass {
                 break;
             }
 
@@ -1116,6 +1135,103 @@ mod tests {
         assert!(
             (result.total_length - 30.0).abs() < 1e-6,
             "Path length should match the partial traversals"
+        );
+    }
+
+    #[test]
+    fn test_relaxed_pass_considers_residential_candidates() {
+        let (network, spatial) = TestNetworkBuilder::new()
+            .add_node(1, 0.0, 0.0)
+            .add_node(2, 0.0, 0.001)
+            .add_node(3, 0.0, 0.002)
+            .add_edge(200, 1, 2, 20.0, Frc::Frc5, Fow::SingleCarriageway)
+            .add_edge(201, 1, 2, 20.0, Frc::Frc4, Fow::SingleCarriageway)
+            .add_edge(202, 2, 3, 20.0, Frc::Frc5, Fow::SingleCarriageway)
+            .add_edge(203, 2, 3, 20.0, Frc::Frc4, Fow::SingleCarriageway)
+            .build();
+
+        let decoder = Decoder::new(&network, &spatial);
+
+        let res_start_idx = *network
+            .edge_id_to_index
+            .as_ref()
+            .unwrap()
+            .get(&200)
+            .unwrap();
+        let tert_start_idx = *network
+            .edge_id_to_index
+            .as_ref()
+            .unwrap()
+            .get(&201)
+            .unwrap();
+        let res_end_idx = *network
+            .edge_id_to_index
+            .as_ref()
+            .unwrap()
+            .get(&202)
+            .unwrap();
+        let tert_end_idx = *network
+            .edge_id_to_index
+            .as_ref()
+            .unwrap()
+            .get(&203)
+            .unwrap();
+
+        let residential_start = Candidate {
+            edge_idx: res_start_idx,
+            distance_m: 0.5,
+            bearing_diff: 0.0,
+            frc_diff: 1,
+            fow_score: 1.0,
+            score: 0.1,
+            projection_fraction: 0.0,
+        };
+        let tertiary_start = Candidate {
+            edge_idx: tert_start_idx,
+            distance_m: 5.0,
+            bearing_diff: 0.0,
+            frc_diff: 0,
+            fow_score: 1.0,
+            score: 2.0,
+            projection_fraction: 0.0,
+        };
+        let residential_end = Candidate {
+            edge_idx: res_end_idx,
+            distance_m: 0.5,
+            bearing_diff: 0.0,
+            frc_diff: 1,
+            fow_score: 1.0,
+            score: 0.1,
+            projection_fraction: 0.5,
+        };
+        let tertiary_end = Candidate {
+            edge_idx: tert_end_idx,
+            distance_m: 5.0,
+            bearing_diff: 0.0,
+            frc_diff: 0,
+            fow_score: 1.0,
+            score: 2.0,
+            projection_fraction: 0.5,
+        };
+
+        let start_candidates = vec![residential_start, tertiary_start];
+        let end_candidates = vec![residential_end, tertiary_end];
+
+        let result = decoder
+            .find_best_path(&start_candidates, &end_candidates, 30.0, 0, Some(Frc::Frc4))
+            .expect("Residential path should be allowed after relaxed pass");
+
+        assert!(
+            result.edges.contains(&res_start_idx),
+            "Relaxed LFRCNP pass should allow the residential start edge"
+        );
+        assert!(
+            result.edges.contains(&res_end_idx),
+            "Relaxed LFRCNP pass should allow the residential end edge"
+        );
+        assert!(
+            !result.edges.contains(&tert_start_idx),
+            "Tertiary start edge should not win when the residential option scores better"
         );
     }
 
