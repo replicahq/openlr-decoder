@@ -50,7 +50,9 @@ impl Ord for AStarNode {
 ///
 /// The `slip_road_cost_penalty` adds a cost penalty when traversing slip roads (ramps/links),
 /// making the search prefer staying on main roads over taking slip roads when paths are similar.
-/// Note: This penalty only affects search priority (f_score), not the returned path length.
+/// The returned path length is the real (unpenalized) distance, but with non-zero penalties the
+/// path found may not be the globally shortest — the search trades minimal real-cost optimality
+/// for preferring main roads over slip roads.
 fn bounded_astar(
     network: &RoadNetwork,
     start: NodeIndex,
@@ -643,7 +645,7 @@ impl<'a> Decoder<'a> {
         min_distance: f64,
         max_valid_distance: f64,
         max_frc: Option<Frc>,
-    ) -> Option<PathResult> {
+    ) -> Option<(PathResult, f64)> {
         // Find edges that appear in both candidate lists
         // Only consider candidates with good spatial match (within 10m)
         const MAX_PROJECTION_DISTANCE: f64 = 10.0;
@@ -706,13 +708,18 @@ impl<'a> Decoder<'a> {
             }
         }
 
-        best_same_edge.map(|(edge_idx, length, _score)| PathResult {
-            edges: vec![edge_idx],
-            coverages: vec![EdgeCoverage {
-                edge_idx,
-                coverage_m: length,
-            }],
-            total_length: length,
+        best_same_edge.map(|(edge_idx, length, score)| {
+            (
+                PathResult {
+                    edges: vec![edge_idx],
+                    coverages: vec![EdgeCoverage {
+                        edge_idx,
+                        coverage_m: length,
+                    }],
+                    total_length: length,
+                },
+                score,
+            )
         })
     }
 
@@ -758,7 +765,7 @@ impl<'a> Decoder<'a> {
         // When both LRPs project closely onto the same edge, prefer this simpler solution
         // over multi-edge paths that may score slightly better on individual candidates
         // but include edges contributing nearly zero length.
-        if let Some(result) = self.try_same_edge_solution(
+        if let Some((result, _score)) = self.try_same_edge_solution(
             start_candidates,
             end_candidates,
             expected_distance,
@@ -789,16 +796,17 @@ impl<'a> Decoder<'a> {
         let mut best_score = f64::MAX;
 
         // Track whether any candidate edges are only available in the relaxed LFRCNP pass.
-        // This allows residential/access roads (now mapped to Frc5) to be reconsidered
-        // even when a stricter Frc4 path exists nearby.
+        // This specifically targets the FRC4→FRC5 boundary: residential/access roads were
+        // remapped from Frc4 to Frc5 to deprioritize them, but we still want the relaxed
+        // pass to reconsider them when LFRCNP=Frc4. Only trigger at this boundary to avoid
+        // undermining LFRCNP filtering at other levels.
         let mut needs_relaxed_pass = false;
         if let Some(strict_limit) = lfrcnp {
-            let relaxed_limit = Frc::from_u8((strict_limit as u8).saturating_add(1));
-            if relaxed_limit > strict_limit {
+            if strict_limit == Frc::Frc4 {
                 for candidate in start_candidates.iter().chain(end_candidates.iter()) {
                     if let Some(edge) = self.network.edge(candidate.edge_idx) {
                         let is_slip = edge.fow == Fow::SlipRoad;
-                        if !is_slip && edge.frc > strict_limit && edge.frc <= relaxed_limit {
+                        if !is_slip && edge.frc == Frc::Frc5 {
                             needs_relaxed_pass = true;
                             break;
                         }
@@ -820,7 +828,7 @@ impl<'a> Decoder<'a> {
             // This is deferred from earlier to ensure strict multi-edge paths are tried first
             if use_relaxed_lfrcnp {
                 let relaxed_frc = lfrcnp.map(|frc| Frc::from_u8((frc as u8).saturating_add(1)));
-                if let Some(result) = self.try_same_edge_solution(
+                if let Some((result, score)) = self.try_same_edge_solution(
                     start_candidates,
                     end_candidates,
                     expected_distance,
@@ -828,7 +836,12 @@ impl<'a> Decoder<'a> {
                     max_valid_distance,
                     relaxed_frc,
                 ) {
-                    return Ok(result);
+                    if best_path.is_none() || score < best_score {
+                        best_score = score;
+                        best_path = Some(result);
+                    }
+                    // Even if we found a relaxed same-edge solution, continue checking
+                    // other candidate pairs so strict results can still win if better.
                 }
             }
 

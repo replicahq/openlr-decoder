@@ -159,8 +159,8 @@ impl PyDecoderConfig {
     #[new]
     #[pyo3(signature = (
         search_radius_m = 100.0,
-        max_bearing_diff = 30.0,
-        frc_tolerance = 3,
+        max_bearing_diff = 90.0,
+        frc_tolerance = 2,
         max_candidates = 10,
         max_candidate_distance_m = 35.0,
         length_tolerance = 0.35,
