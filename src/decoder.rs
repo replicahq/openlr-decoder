@@ -48,11 +48,11 @@ impl Ord for AStarNode {
 /// per OpenLR spec Section 12.1 Step 5. When provided, the search will only traverse edges
 /// with FRC <= max_frc (lower FRC = higher road importance).
 ///
-/// The `slip_road_cost_penalty` adds a cost penalty when traversing slip roads (ramps/links),
-/// making the search prefer staying on main roads over taking slip roads when paths are similar.
-/// The returned path length is the real (unpenalized) distance, but with non-zero penalties the
-/// path found may not be the globally shortest — the search trades minimal real-cost optimality
-/// for preferring main roads over slip roads.
+/// The cost penalties (`slip_road_cost_penalty`, `access_road_cost_penalty`) add soft preferences
+/// that make the search favor main roads over slip roads and tertiary over residential when paths
+/// are similar in length. The returned path length is the real (unpenalized) distance, but with
+/// non-zero penalties the path found may not be the globally shortest — the search trades minimal
+/// real-cost optimality for preferring higher-class roads.
 fn bounded_astar(
     network: &RoadNetwork,
     start: NodeIndex,
@@ -61,6 +61,7 @@ fn bounded_astar(
     max_cost: f64,
     max_frc: Option<Frc>,
     slip_road_cost_penalty: f64,
+    access_road_cost_penalty: f64,
 ) -> Option<(f64, Vec<NodeIndex>, Vec<EdgeIndex>)> {
     let mut open_set = BinaryHeap::new();
     // Track both real distance (g_scores) and penalized cost (for priority)
@@ -127,6 +128,8 @@ fn bounded_astar(
             let real_edge_cost = edge.weight().length_m;
             let penalty = if edge.weight().fow == Fow::SlipRoad {
                 slip_road_cost_penalty
+            } else if edge.weight().is_access_road {
+                access_road_cost_penalty
             } else {
                 0.0
             };
@@ -238,6 +241,10 @@ pub struct DecoderConfig {
     /// This makes the decoder prefer staying on main roads over taking slip roads
     /// when paths are similar in length. Default 20m.
     pub slip_road_cost_penalty: f64,
+    /// Cost penalty in meters for traversing access/local roads (residential, living_street,
+    /// service, track) in A* search. This makes the decoder prefer tertiary/unclassified
+    /// roads over residential when paths are similar in length. Default 10m.
+    pub access_road_cost_penalty: f64,
 }
 
 impl Default for DecoderConfig {
@@ -248,6 +255,7 @@ impl Default for DecoderConfig {
             absolute_length_tolerance: 100.0, // 100m absolute tolerance
             max_search_distance_factor: 2.0, // Search up to 2x the expected distance
             slip_road_cost_penalty: 20.0, // 20m penalty gently prefers main roads over slip roads
+            access_road_cost_penalty: 10.0, // 10m penalty gently prefers tertiary over residential
         }
     }
 }
@@ -795,32 +803,12 @@ impl<'a> Decoder<'a> {
         let mut best_path: Option<PathResult> = None;
         let mut best_score = f64::MAX;
 
-        // Track whether any candidate edges are only available in the relaxed LFRCNP pass.
-        // This specifically targets the FRC4→FRC5 boundary: residential/access roads were
-        // remapped from Frc4 to Frc5 to deprioritize them, but we still want the relaxed
-        // pass to reconsider them when LFRCNP=Frc4. Only trigger at this boundary to avoid
-        // undermining LFRCNP filtering at other levels.
-        let mut needs_relaxed_pass = false;
-        if let Some(strict_limit) = lfrcnp {
-            if strict_limit == Frc::Frc4 {
-                for candidate in start_candidates.iter().chain(end_candidates.iter()) {
-                    if let Some(edge) = self.network.edge(candidate.edge_idx) {
-                        let is_slip = edge.fow == Fow::SlipRoad;
-                        if !is_slip && edge.frc == Frc::Frc5 {
-                            needs_relaxed_pass = true;
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
         // Two-pass approach for LFRCNP: try strict first, then fallback to relaxed
         // This prevents mixing valid FRC edges with invalid ones (e.g., taking a
         // residential detour when a primary road path exists within LFRCNP)
         for use_relaxed_lfrcnp in [false, true] {
             // If we found a path in strict pass, skip relaxed pass
-            if use_relaxed_lfrcnp && best_path.is_some() && !needs_relaxed_pass {
+            if use_relaxed_lfrcnp && best_path.is_some() {
                 break;
             }
 
@@ -976,6 +964,7 @@ impl<'a> Decoder<'a> {
                         middle_max,
                         max_frc_for_astar,
                         self.config.slip_road_cost_penalty,
+                        self.config.access_road_cost_penalty,
                     ) {
                         Some(result) => result,
                         None => continue,
@@ -1151,103 +1140,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_relaxed_pass_considers_residential_candidates() {
-        let (network, spatial) = TestNetworkBuilder::new()
-            .add_node(1, 0.0, 0.0)
-            .add_node(2, 0.0, 0.001)
-            .add_node(3, 0.0, 0.002)
-            .add_edge(200, 1, 2, 20.0, Frc::Frc5, Fow::SingleCarriageway)
-            .add_edge(201, 1, 2, 20.0, Frc::Frc4, Fow::SingleCarriageway)
-            .add_edge(202, 2, 3, 20.0, Frc::Frc5, Fow::SingleCarriageway)
-            .add_edge(203, 2, 3, 20.0, Frc::Frc4, Fow::SingleCarriageway)
-            .build();
-
-        let decoder = Decoder::new(&network, &spatial);
-
-        let res_start_idx = *network
-            .edge_id_to_index
-            .as_ref()
-            .unwrap()
-            .get(&200)
-            .unwrap();
-        let tert_start_idx = *network
-            .edge_id_to_index
-            .as_ref()
-            .unwrap()
-            .get(&201)
-            .unwrap();
-        let res_end_idx = *network
-            .edge_id_to_index
-            .as_ref()
-            .unwrap()
-            .get(&202)
-            .unwrap();
-        let tert_end_idx = *network
-            .edge_id_to_index
-            .as_ref()
-            .unwrap()
-            .get(&203)
-            .unwrap();
-
-        let residential_start = Candidate {
-            edge_idx: res_start_idx,
-            distance_m: 0.5,
-            bearing_diff: 0.0,
-            frc_diff: 1,
-            fow_score: 1.0,
-            score: 0.1,
-            projection_fraction: 0.0,
-        };
-        let tertiary_start = Candidate {
-            edge_idx: tert_start_idx,
-            distance_m: 5.0,
-            bearing_diff: 0.0,
-            frc_diff: 0,
-            fow_score: 1.0,
-            score: 2.0,
-            projection_fraction: 0.0,
-        };
-        let residential_end = Candidate {
-            edge_idx: res_end_idx,
-            distance_m: 0.5,
-            bearing_diff: 0.0,
-            frc_diff: 1,
-            fow_score: 1.0,
-            score: 0.1,
-            projection_fraction: 0.5,
-        };
-        let tertiary_end = Candidate {
-            edge_idx: tert_end_idx,
-            distance_m: 5.0,
-            bearing_diff: 0.0,
-            frc_diff: 0,
-            fow_score: 1.0,
-            score: 2.0,
-            projection_fraction: 0.5,
-        };
-
-        let start_candidates = vec![residential_start, tertiary_start];
-        let end_candidates = vec![residential_end, tertiary_end];
-
-        let result = decoder
-            .find_best_path(&start_candidates, &end_candidates, 30.0, 0, Some(Frc::Frc4))
-            .expect("Residential path should be allowed after relaxed pass");
-
-        assert!(
-            result.edges.contains(&res_start_idx),
-            "Relaxed LFRCNP pass should allow the residential start edge"
-        );
-        assert!(
-            result.edges.contains(&res_end_idx),
-            "Relaxed LFRCNP pass should allow the residential end edge"
-        );
-        assert!(
-            !result.edges.contains(&tert_start_idx),
-            "Tertiary start edge should not win when the residential option scores better"
-        );
-    }
-
     // =========================================================================
     // Route Search Tests (ported from Java OpenLR RouteSearchTest)
     // =========================================================================
@@ -1278,7 +1170,7 @@ mod tests {
         let goal_coord = network.node(goal).unwrap().coord;
 
         // Max cost of 500m should easily accommodate the 250m path
-        let result = bounded_astar(&network, start, goal, goal_coord, 500.0, None, 0.0);
+        let result = bounded_astar(&network, start, goal, goal_coord, 500.0, None, 0.0, 0.0);
 
         assert!(result.is_some(), "Should find a valid path within max_cost");
 
@@ -1316,7 +1208,7 @@ mod tests {
 
         // Max cost of 100m is less than the 250m path - should fail
         // (This mirrors Java's NO_ROUTE_FOUND_MAX_DISTANCE = 100)
-        let result = bounded_astar(&network, start, goal, goal_coord, 100.0, None, 0.0);
+        let result = bounded_astar(&network, start, goal, goal_coord, 100.0, None, 0.0, 0.0);
 
         assert!(
             result.is_none(),
@@ -1342,7 +1234,7 @@ mod tests {
         let goal = *network.node_id_to_index.as_ref().unwrap().get(&4).unwrap();
         let goal_coord = network.node(goal).unwrap().coord;
 
-        let result = bounded_astar(&network, start, goal, goal_coord, 1000.0, None, 0.0);
+        let result = bounded_astar(&network, start, goal, goal_coord, 1000.0, None, 0.0, 0.0);
         assert!(result.is_some());
 
         let (cost, nodes, _edges) = result.unwrap();
@@ -1388,7 +1280,7 @@ mod tests {
         let goal = *network.node_id_to_index.as_ref().unwrap().get(&4).unwrap();
         let goal_coord = network.node(goal).unwrap().coord;
 
-        let result = bounded_astar(&network, start, goal, goal_coord, 500.0, None, 0.0);
+        let result = bounded_astar(&network, start, goal, goal_coord, 500.0, None, 0.0, 0.0);
         assert!(result.is_some());
 
         let (cost, nodes, _edges) = result.unwrap();
@@ -1436,6 +1328,7 @@ mod tests {
             200.0,
             Some(Frc::Frc3),
             0.0,
+            0.0,
         )
         .unwrap();
         let (_, _, edges) = result;
@@ -1464,7 +1357,7 @@ mod tests {
         let goal = start; // Same node
         let goal_coord = network.node(goal).unwrap().coord;
 
-        let result = bounded_astar(&network, start, goal, goal_coord, 100.0, None, 0.0);
+        let result = bounded_astar(&network, start, goal, goal_coord, 100.0, None, 0.0, 0.0);
         assert!(result.is_some());
 
         let (cost, nodes, _edges) = result.unwrap();
@@ -1490,7 +1383,7 @@ mod tests {
         let goal = *network.node_id_to_index.as_ref().unwrap().get(&4).unwrap(); // In different component
         let goal_coord = network.node(goal).unwrap().coord;
 
-        let result = bounded_astar(&network, start, goal, goal_coord, 10000.0, None, 0.0);
+        let result = bounded_astar(&network, start, goal, goal_coord, 10000.0, None, 0.0, 0.0);
 
         assert!(
             result.is_none(),
@@ -1532,7 +1425,8 @@ mod tests {
         let goal_coord = network.node(goal).unwrap().coord;
 
         // Without LFRCNP: should find shorter path via node 3 (150m)
-        let result_no_filter = bounded_astar(&network, start, goal, goal_coord, 500.0, None, 0.0);
+        let result_no_filter =
+            bounded_astar(&network, start, goal, goal_coord, 500.0, None, 0.0, 0.0);
         assert!(result_no_filter.is_some());
         let (cost_no_filter, _, _) = result_no_filter.unwrap();
         assert!(
@@ -1549,6 +1443,7 @@ mod tests {
             goal_coord,
             500.0,
             Some(Frc::Frc2),
+            0.0,
             0.0,
         );
         assert!(
@@ -1600,6 +1495,7 @@ mod tests {
             500.0,
             Some(Frc::Frc7),
             0.0,
+            0.0,
         );
         assert!(result.is_some());
         let (cost, _, _) = result.unwrap();
@@ -1633,6 +1529,7 @@ mod tests {
             500.0,
             Some(Frc::Frc3),
             0.0,
+            0.0,
         );
         assert!(
             result.is_none(),
@@ -1640,7 +1537,8 @@ mod tests {
         );
 
         // But without filtering, path should exist
-        let result_unfiltered = bounded_astar(&network, start, goal, goal_coord, 500.0, None, 0.0);
+        let result_unfiltered =
+            bounded_astar(&network, start, goal, goal_coord, 500.0, None, 0.0, 0.0);
         assert!(
             result_unfiltered.is_some(),
             "Without LFRCNP, path should exist"
@@ -1678,7 +1576,8 @@ mod tests {
         let goal_coord = network.node(goal).unwrap().coord;
 
         // Without penalty: should find shorter slip road path (100m)
-        let result_no_penalty = bounded_astar(&network, start, goal, goal_coord, 500.0, None, 0.0);
+        let result_no_penalty =
+            bounded_astar(&network, start, goal, goal_coord, 500.0, None, 0.0, 0.0);
         assert!(result_no_penalty.is_some());
         let (cost_no_penalty, nodes_no_penalty, _) = result_no_penalty.unwrap();
         assert!(
@@ -1690,7 +1589,7 @@ mod tests {
         // With 25m penalty per slip road: slip road path effective cost = 100 + 25*2 = 150m
         // Main road path stays at 120m, so should be preferred
         let result_with_penalty =
-            bounded_astar(&network, start, goal, goal_coord, 500.0, None, 25.0);
+            bounded_astar(&network, start, goal, goal_coord, 500.0, None, 25.0, 0.0);
         assert!(result_with_penalty.is_some());
         let (cost_with_penalty, nodes_with_penalty, _) = result_with_penalty.unwrap();
         assert!(
@@ -1728,7 +1627,7 @@ mod tests {
 
         // Even with penalty, the returned cost should be the REAL path length (100m)
         // Penalty only affects search priority, not the returned path length
-        let result = bounded_astar(&network, start, goal, goal_coord, 500.0, None, 50.0);
+        let result = bounded_astar(&network, start, goal, goal_coord, 500.0, None, 50.0, 0.0);
         assert!(result.is_some());
         let (cost, _, _) = result.unwrap();
 
@@ -1736,6 +1635,59 @@ mod tests {
             (cost - 100.0).abs() < 1.0,
             "A* should return real path length (100m), not penalized cost, got {}m",
             cost
+        );
+    }
+
+    /// Test that access road penalty makes A* prefer tertiary over residential
+    #[test]
+    fn test_bounded_astar_access_road_penalty_prefers_tertiary() {
+        // Diamond network:
+        // - Upper path (via node 2): access road - 100m
+        // - Lower path (via node 3): tertiary - 120m (longer but preferred with penalty)
+        let (network, _) = TestNetworkBuilder::new()
+            .add_node(1, 0.0, 0.0)
+            .add_node(2, 0.001, 0.001)
+            .add_node(3, -0.001, 0.001)
+            .add_node(4, 0.0, 0.002)
+            // Upper path: access road (shorter at 100m)
+            .add_access_road(1, 1, 2, 50.0, Frc::Frc4, Fow::SingleCarriageway)
+            .add_access_road(2, 2, 4, 50.0, Frc::Frc4, Fow::SingleCarriageway)
+            // Lower path: tertiary (longer at 120m)
+            .add_edge(3, 1, 3, 60.0, Frc::Frc4, Fow::SingleCarriageway)
+            .add_edge(4, 3, 4, 60.0, Frc::Frc4, Fow::SingleCarriageway)
+            .build();
+
+        let start = *network.node_id_to_index.as_ref().unwrap().get(&1).unwrap();
+        let goal = *network.node_id_to_index.as_ref().unwrap().get(&4).unwrap();
+        let goal_coord = network.node(goal).unwrap().coord;
+
+        // Without penalty: should find shorter access road path (100m)
+        let result_no_penalty =
+            bounded_astar(&network, start, goal, goal_coord, 500.0, None, 0.0, 0.0);
+        assert!(result_no_penalty.is_some());
+        let (cost_no_penalty, _, _) = result_no_penalty.unwrap();
+        assert!(
+            (cost_no_penalty - 100.0).abs() < 1.0,
+            "Without penalty, should find 100m access road path, got {}m",
+            cost_no_penalty
+        );
+
+        // With 15m penalty per access road edge: effective cost = 100 + 15*2 = 130m
+        // Tertiary path stays at 120m, so should be preferred
+        let result_with_penalty =
+            bounded_astar(&network, start, goal, goal_coord, 500.0, None, 0.0, 15.0);
+        assert!(result_with_penalty.is_some());
+        let (cost_with_penalty, nodes_with_penalty, _) = result_with_penalty.unwrap();
+        assert!(
+            (cost_with_penalty - 120.0).abs() < 1.0,
+            "With access road penalty, should find 120m tertiary path, got {}m",
+            cost_with_penalty
+        );
+
+        let node3_idx = *network.node_id_to_index.as_ref().unwrap().get(&3).unwrap();
+        assert!(
+            nodes_with_penalty.contains(&node3_idx),
+            "With penalty, path should use tertiary road (node 3)"
         );
     }
 }

@@ -150,6 +150,10 @@ pub struct PyDecoderConfig {
     /// Makes decoder prefer main roads over slip roads. Default 20m.
     #[pyo3(get, set)]
     pub slip_road_cost_penalty: f64,
+    /// Cost penalty in meters for traversing access/local roads (residential, living_street,
+    /// service, track) in A* search. Makes decoder prefer tertiary over residential. Default 10m.
+    #[pyo3(get, set)]
+    pub access_road_cost_penalty: f64,
 }
 
 #[pymethods]
@@ -170,7 +174,8 @@ impl PyDecoderConfig {
         bearing_weight = 0.2,
         frc_weight = 0.1,
         fow_weight = 0.1,
-        slip_road_cost_penalty = 20.0
+        slip_road_cost_penalty = 20.0,
+        access_road_cost_penalty = 10.0
     ))]
     fn new(
         search_radius_m: f64,
@@ -186,6 +191,7 @@ impl PyDecoderConfig {
         frc_weight: f64,
         fow_weight: f64,
         slip_road_cost_penalty: f64,
+        access_road_cost_penalty: f64,
     ) -> Self {
         PyDecoderConfig {
             search_radius_m,
@@ -201,6 +207,7 @@ impl PyDecoderConfig {
             frc_weight,
             fow_weight,
             slip_road_cost_penalty,
+            access_road_cost_penalty,
         }
     }
 
@@ -210,7 +217,7 @@ impl PyDecoderConfig {
              max_candidates={}, max_candidate_distance_m={}, length_tolerance={}, \
              absolute_length_tolerance={}, max_search_distance_factor={}, \
              distance_weight={}, bearing_weight={}, frc_weight={}, fow_weight={}, \
-             slip_road_cost_penalty={})",
+             slip_road_cost_penalty={}, access_road_cost_penalty={})",
             self.search_radius_m,
             self.max_bearing_diff,
             self.frc_tolerance,
@@ -223,7 +230,8 @@ impl PyDecoderConfig {
             self.bearing_weight,
             self.frc_weight,
             self.fow_weight,
-            self.slip_road_cost_penalty
+            self.slip_road_cost_penalty,
+            self.access_road_cost_penalty
         )
     }
 }
@@ -246,6 +254,7 @@ impl From<&PyDecoderConfig> for DecoderConfig {
             absolute_length_tolerance: config.absolute_length_tolerance,
             max_search_distance_factor: config.max_search_distance_factor,
             slip_road_cost_penalty: config.slip_road_cost_penalty,
+            access_road_cost_penalty: config.access_road_cost_penalty,
         }
     }
 }

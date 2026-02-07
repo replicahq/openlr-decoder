@@ -410,6 +410,7 @@ fn process_batch(
                 geom_with_metrics.length_m,
                 geom_with_metrics.bearing_start,
                 geom_with_metrics.bearing_end,
+                Frc::is_access_road(hw_tag),
             );
 
             Some(PendingEdge { sv_id, ev_id, edge })
@@ -619,9 +620,8 @@ mod tests {
     fn test_frc_highway_mapping() {
         assert_eq!(Frc::from_osm_highway("motorway"), Frc::Frc0);
         assert_eq!(Frc::from_osm_highway("tertiary"), Frc::Frc4);
-        // Access/local roads are deprioritized to Frc5
-        assert_eq!(Frc::from_osm_highway("residential"), Frc::Frc5);
-        assert_eq!(Frc::from_osm_highway("service"), Frc::Frc5);
+        assert_eq!(Frc::from_osm_highway("residential"), Frc::Frc4);
+        assert_eq!(Frc::from_osm_highway("service"), Frc::Frc4);
     }
 
     #[test]

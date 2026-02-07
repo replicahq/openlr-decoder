@@ -41,9 +41,9 @@ impl Frc {
     /// Maps OSM road types to the 0-indexed FRC values used in OpenLR binary format.
     /// These correspond to HERE's FC1–FC5 importance levels (Frc0=FC1 ... Frc4=FC5).
     ///
-    /// Note: Access/local roads (residential, living_street, service, track) map to Frc5
-    /// to deprioritize them while still allowing them to match HERE-encoded LRPs with
-    /// FRC4 (within ±1 tolerance).
+    /// All navigable OSM roads map into the Frc0–Frc4 range to match HERE-encoded LRPs.
+    /// Residential/access roads are also Frc4 (same as tertiary) but are deprioritized
+    /// via A* cost penalties rather than FRC classification.
     pub fn from_osm_highway(highway: &str) -> Self {
         match highway {
             // Frc0: Controlled-access highways (highest importance)
@@ -55,14 +55,23 @@ impl Frc {
             // Frc3: Moderate speed roads connecting neighborhoods
             "secondary" => Frc::Frc3,
             "motorway_link" | "trunk_link" | "primary_link" => Frc::Frc3,
-            // Frc4: Local connecting roads (lowest importance in HERE's scheme)
-            "tertiary" | "secondary_link" | "tertiary_link" | "unclassified" => Frc::Frc4,
-            // Frc5: Access/local roads - deprioritized but still matchable with ±1 tolerance
-            "residential" | "living_street" | "service" | "track" => Frc::Frc5,
+            // Frc4: Local/residential roads (lowest importance in HERE's scheme)
+            "tertiary" | "secondary_link" | "tertiary_link" | "unclassified" | "residential"
+            | "living_street" | "service" | "track" => Frc::Frc4,
             // Not in HERE's network — use Frc7 so these edges won't match
             // HERE-encoded LRPs (outside ±2 tolerance from Frc0–Frc4)
             _ => Frc::Frc7,
         }
+    }
+
+    /// Returns true for OSM highway tags that represent access/local roads
+    /// (residential, living_street, service, track). These are deprioritized
+    /// via A* cost penalties rather than FRC classification.
+    pub fn is_access_road(highway: &str) -> bool {
+        matches!(
+            highway,
+            "residential" | "living_street" | "service" | "track"
+        )
     }
 
     /// Check if another FRC is within tolerance (per OpenLR spec: ±1 or exact)
@@ -173,6 +182,9 @@ pub struct Edge {
     pub fow: Fow,
     pub bearing_start: f64, // Bearing at start of edge (0-360)
     pub bearing_end: f64,   // Bearing at end of edge (0-360)
+    /// True for residential/living_street/service/track roads.
+    /// Used by A* to apply a cost penalty, preferring tertiary over residential.
+    pub is_access_road: bool,
 }
 
 impl Edge {
@@ -186,6 +198,7 @@ impl Edge {
         length_m: f64,
         bearing_start: f64,
         bearing_end: f64,
+        is_access_road: bool,
     ) -> Self {
         Edge {
             id,
@@ -195,6 +208,7 @@ impl Edge {
             fow,
             bearing_start,
             bearing_end,
+            is_access_road,
         }
     }
 
@@ -213,6 +227,7 @@ impl Edge {
             fow,
             bearing_start,
             bearing_end,
+            is_access_road: false,
         }
     }
 
@@ -364,16 +379,15 @@ mod tests {
         assert_eq!(Frc::from_osm_highway("primary"), Frc::Frc2);
         assert_eq!(Frc::from_osm_highway("secondary"), Frc::Frc3);
         assert_eq!(Frc::from_osm_highway("motorway_link"), Frc::Frc3);
-        // FRC4: Local connecting roads
+        // FRC4: Local/residential roads
         assert_eq!(Frc::from_osm_highway("tertiary"), Frc::Frc4);
         assert_eq!(Frc::from_osm_highway("secondary_link"), Frc::Frc4);
         assert_eq!(Frc::from_osm_highway("tertiary_link"), Frc::Frc4);
         assert_eq!(Frc::from_osm_highway("unclassified"), Frc::Frc4);
-        // FRC5: Access/local roads (deprioritized but matchable)
-        assert_eq!(Frc::from_osm_highway("residential"), Frc::Frc5);
-        assert_eq!(Frc::from_osm_highway("living_street"), Frc::Frc5);
-        assert_eq!(Frc::from_osm_highway("service"), Frc::Frc5);
-        assert_eq!(Frc::from_osm_highway("track"), Frc::Frc5);
+        assert_eq!(Frc::from_osm_highway("residential"), Frc::Frc4);
+        assert_eq!(Frc::from_osm_highway("living_street"), Frc::Frc4);
+        assert_eq!(Frc::from_osm_highway("service"), Frc::Frc4);
+        assert_eq!(Frc::from_osm_highway("track"), Frc::Frc4);
         // FRC7: Not navigable
         assert_eq!(Frc::from_osm_highway("cycleway"), Frc::Frc7);
     }
@@ -383,8 +397,6 @@ mod tests {
         assert!(Frc::Frc2.is_compatible(Frc::Frc2, 1));
         assert!(Frc::Frc2.is_compatible(Frc::Frc3, 1));
         assert!(!Frc::Frc2.is_compatible(Frc::Frc5, 1));
-        // Residential (Frc5) should be compatible with FRC4 at tolerance 1
-        assert!(Frc::Frc5.is_compatible(Frc::Frc4, 1));
     }
 
     #[test]
