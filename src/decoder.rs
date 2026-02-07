@@ -53,6 +53,7 @@ impl Ord for AStarNode {
 /// are similar in length. The returned path length is the real (unpenalized) distance, but with
 /// non-zero penalties the path found may not be the globally shortest — the search trades minimal
 /// real-cost optimality for preferring higher-class roads.
+#[allow(clippy::too_many_arguments)]
 fn bounded_astar(
     network: &RoadNetwork,
     start: NodeIndex,

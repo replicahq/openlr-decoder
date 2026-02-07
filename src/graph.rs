@@ -190,6 +190,7 @@ pub struct Edge {
 impl Edge {
     /// Create edge from geometry with pre-computed metrics.
     /// Use this when metrics have already been computed during geometry parsing.
+    #[allow(clippy::too_many_arguments)]
     pub fn from_precomputed(
         id: u64,
         geometry: LineString<f64>,
