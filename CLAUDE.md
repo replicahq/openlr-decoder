@@ -158,11 +158,27 @@ The app shows:
 
 ### Debugging Approach
 
-1. IMPORTANT: Never manually decode OpenLR references using custom code: only use the Python or Rust libraries.
+1. IMPORTANT: Never manually decode OpenLR references to LRPs using custom code: only use the Python or Rust libraries. You can decode from the command line like: `uvx --with openlr python -m openlr <base64_openlr_code>`
 2. **Visualize the LRPs**: See where they land on the map
 3. **Check candidate edges**: Are the correct roads being found?
 4. **Verify connectivity**: Can A* find a path between candidate pairs?
 5. **Compare path length**: Does actual length match DNP expectations?
+6. **Inspect the network graph** with networkx to check connectivity, find shortest paths between vertices, or look up edges by ID:
+
+```python
+import networkx as nx
+import polars as pl
+
+df = pl.read_parquet("openlr_test_edges.parquet")
+
+G = nx.from_pandas_edgelist(
+    df,
+    source="startVertex",
+    target="endVertex",
+    edge_attr=["stableEdgeId", "highway", "lanes"],
+    create_using=nx.DiGraph,
+)
+```
 
 ### Configuration Tuning
 
