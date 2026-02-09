@@ -1,0 +1,52 @@
+site_name: openlr-decoder
+site_description: Fast OpenLR location reference decoder for Python
+site_url: https://replicahq.github.io/openlr-decoder
+repo_url: https://github.com/replicahq/openlr-decoder
+repo_name: replicahq/openlr-decoder
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: blue grey
+      accent: teal
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: blue grey
+      accent: teal
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - content.code.copy
+    - navigation.sections
+    - navigation.expand
+    - toc.follow
+
+nav:
+  - Home: index.md
+  - Getting Started: getting-started.md
+  - OpenLR Concepts: concepts.md
+  - Preparing Network Data: preparing-network-data.md
+  - API Reference: api-reference.md
+  - Configuration Guide: configuration.md
+  - Troubleshooting: troubleshooting.md
+  - Changelog: changelog.md
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.tabbed:
+      alternate_style: true
+  - tables
+  - toc:
+      permalink: true
+  - attr_list

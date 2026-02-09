@@ -1,0 +1,13 @@
+# openlr-decoder
+
+> Fast OpenLR location reference decoder for Python. Decodes HERE-encoded OpenLR onto OSM-based road networks using a Rust backend.
+
+## Docs
+
+- [Getting Started](https://replicahq.github.io/openlr-decoder/getting-started/): Installation, loading networks, single and batch decoding
+- [OpenLR Concepts](https://replicahq.github.io/openlr-decoder/concepts/): LRPs, FRC, FOW, cross-provider challenges
+- [Preparing Network Data](https://replicahq.github.io/openlr-decoder/preparing-network-data/): Parquet schema, data sourcing
+- [API Reference](https://replicahq.github.io/openlr-decoder/api-reference/): RoadNetwork, Decoder, DecoderConfig, DecodedPath, road_network_schema
+- [Configuration Guide](https://replicahq.github.io/openlr-decoder/configuration/): Tuning parameters for different use cases
+- [Troubleshooting](https://replicahq.github.io/openlr-decoder/troubleshooting/): Common errors and debugging
+- [Full documentation for LLMs](https://replicahq.github.io/openlr-decoder/llms-full.txt): Complete documentation in a single file

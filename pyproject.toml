@@ -27,6 +27,7 @@ classifiers = [
 [project.urls]
 Homepage = "https://github.com/replicahq/openlr-decoder"
 Repository = "https://github.com/replicahq/openlr-decoder"
+Documentation = "https://replicahq.github.io/openlr-decoder"
 
 [tool.maturin]
 features = ["python"]
