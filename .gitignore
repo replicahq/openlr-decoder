@@ -18,6 +18,9 @@ uv.lock
 .vscode/
 *.swp
 
+# MkDocs
+site/
+
 # OS
 .DS_Store
 tags

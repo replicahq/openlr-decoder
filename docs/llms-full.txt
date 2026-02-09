@@ -1,0 +1,163 @@
+# openlr-decoder
+
+Fast OpenLR location reference decoder for Python. Decodes HERE-encoded OpenLR location references onto OSM-based road networks using a Rust backend with Python bindings via PyO3.
+
+## Installation
+
+```
+pip install openlr-decoder
+```
+
+Pre-built wheels for Linux (x86_64), macOS (x86_64/arm64), and Windows. No Rust toolchain needed.
+
+## Quick Start
+
+```python
+from openlr_decoder import RoadNetwork, Decoder
+
+network = RoadNetwork.from_parquet("network.parquet")
+decoder = Decoder(network)
+
+# Single decode
+result = decoder.decode("CwRbWyNG9RpsCQCb/jsboAD/6/+E")
+print(result.edge_ids)  # [12345, 12346, 12347]
+print(result.length)     # 542.3 (meters)
+
+# Batch decode (parallel, returns Arrow RecordBatch)
+batch = decoder.decode_batch(["code1", "code2", ...])
+
+import polars as pl
+df = pl.from_arrow(batch)
+```
+
+## API Reference
+
+### RoadNetwork
+
+Directed graph with spatial index loaded from road network data.
+
+- `RoadNetwork.from_parquet(path: str) -> RoadNetwork` — load from Parquet file
+- `RoadNetwork.from_arrow(data) -> RoadNetwork` — load from any Arrow-compatible source (PyArrow Table, Polars DataFrame, RecordBatchReader). Zero-copy.
+- `network.edge_count` — property, number of edges
+- `network.node_count` — property, number of nodes
+
+### DecoderConfig
+
+All parameters optional, defaults tuned for HERE-to-OSM cross-provider decoding.
+
+```python
+DecoderConfig(
+    search_radius_m=100.0,           # radius (m) for finding candidate edges
+    max_bearing_diff=90.0,           # max bearing difference (degrees)
+    frc_tolerance=2,                 # max FRC class difference (0-7)
+    max_candidates=10,               # max candidates per LRP
+    max_candidate_distance_m=35.0,   # max distance (m) from LRP to candidate
+    length_tolerance=0.35,           # relative path length tolerance (35%)
+    absolute_length_tolerance=100.0, # absolute path length tolerance (m)
+    max_search_distance_factor=2.0,  # A* search distance limit as multiple of DNP
+    distance_weight=10.0,            # scoring weight for distance
+    bearing_weight=0.2,              # scoring weight for bearing
+    frc_weight=0.1,                  # scoring weight for FRC
+    fow_weight=0.1,                  # scoring weight for FOW
+    slip_road_cost_penalty=20.0,     # A* penalty (m) for slip roads
+    access_road_cost_penalty=10.0,   # A* penalty (m) for access/local roads
+)
+```
+
+All parameters are readable and writable after construction.
+
+### Decoder
+
+- `Decoder(network: RoadNetwork, config: DecoderConfig | None = None)` — create decoder
+- `decoder.decode(openlr_base64: str) -> DecodedPath` — decode single code, raises ValueError on failure
+- `decoder.decode_batch(openlr_codes: list[str]) -> pyarrow.RecordBatch` — decode in parallel, returns batch with error column
+
+### DecodedPath
+
+Returned by `decode()`. Properties:
+
+- `edge_ids: list[int]` — ordered edge IDs forming the path
+- `length: float` — total path length in meters
+- `positive_offset: float` — meters from start of first edge to location start
+- `negative_offset: float` — meters from location end to end of last edge
+- `positive_offset_fraction: float` — fraction (0-1) along first edge where location starts
+- `negative_offset_fraction: float` — fraction (0-1) along last edge from end
+- `primary_edge_id: int` — edge covering most distance
+- `primary_edge_coverage: float` — meters covered by primary edge
+
+### decode_batch() RecordBatch Schema
+
+Columns: edge_ids (list<uint64>), length (float64), positive_offset (float64), negative_offset (float64), positive_offset_fraction (float64), negative_offset_fraction (float64), primary_edge_id (uint64), primary_edge_coverage (float64), error (string, nullable — null on success).
+
+### road_network_schema()
+
+Returns the expected PyArrow Schema for network input data.
+
+## Network Data Schema (Parquet)
+
+Required columns:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| stableEdgeId | uint64 | Unique edge identifier |
+| startVertex | int64 | Start node ID |
+| endVertex | int64 | End node ID |
+| startLat | float64 | Start latitude |
+| startLon | float64 | Start longitude |
+| endLat | float64 | End latitude |
+| endLon | float64 | End longitude |
+| highway | string | OSM highway tag |
+
+Optional columns:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| lanes | int64 | Lane count (for FOW inference) |
+| geometry | binary (WKB) | LineString geometry |
+
+## OpenLR Concepts
+
+OpenLR encodes a road location as a sequence of Location Reference Points (LRPs). Each LRP has: coordinate (lat/lon), bearing (degrees), FRC (Functional Road Class, 0-7), FOW (Form of Way, 0-7), DNP (distance to next point, meters), LFRCNP (lowest FRC to next point).
+
+### FRC Mapping (HERE FC to OpenLR FRC to OSM)
+
+- FRC0 / FC1: motorway
+- FRC1 / FC2: trunk
+- FRC2 / FC3: primary
+- FRC3 / FC4: secondary, *_link
+- FRC4 / FC5: tertiary, residential, unclassified, service, living_street, track
+
+### FOW Values
+
+0=Undefined, 1=Motorway, 2=Multiple Carriageway, 3=Single Carriageway, 4=Roundabout, 5=Traffic Square, 6=Slip Road, 7=Other
+
+## Cross-Provider Decoding Design
+
+This decoder is purpose-built for HERE-encoded OpenLR decoded onto OSM networks. Key design decisions:
+
+- Distance dominates scoring (weight 10.0) because spatial proximity is the strongest signal when networks differ
+- FRC/FOW have low weight (0.1) because classification systems don't map 1:1
+- Wide bearing tolerance (90°) because geometry digitization differs
+- Generous length tolerance (35% + 100m) for segmentation and quantization differences
+
+## Error Messages
+
+- "No matching roads found for location reference point N" — no candidates within search radius, road may not exist in network
+- "No valid path found between points N and M" — A* search failed, network may have gaps or one-way restrictions
+- "Path length mismatch: expected Xm, got Ym" — path found but length outside tolerance
+- "Invalid OpenLR: ..." — base64 string couldn't be parsed
+- "Unsupported location type: ..." — only line locations are supported
+
+## Troubleshooting
+
+Inspect raw LRP attributes: `uvx --with openlr python -m openlr <base64_code>`
+
+Check network connectivity with NetworkX:
+```python
+import networkx as nx
+G = nx.from_pandas_edgelist(df.to_pandas(), source="startVertex", target="endVertex",
+    edge_attr=["stableEdgeId", "highway"], create_using=nx.DiGraph)
+nx.has_path(G, start_vertex, end_vertex)
+```
+
+Performance: use decode_batch() for multiple codes, from_arrow() for zero-copy loading, filter network to relevant region.
