@@ -456,8 +456,10 @@ impl<'a> Decoder<'a> {
             .map(|e| e.id)
             .unwrap_or(0);
 
-        // Compute offsets by projecting LRP coordinates onto first/last decoded edges
-        // This tells us how much of the decoded path extends beyond the LRP coordinates
+        // Spec deviation: OpenLR Section 12.10 says offsets come from the binary-encoded
+        // fractions, but HERE data always encodes them as 0. Instead we project the LRP
+        // coordinates onto the first/last edges in our network, giving edge-relative offsets
+        // that are meaningful for consumers working with OSM edges.
         let (
             positive_offset_m,
             negative_offset_m,
@@ -608,7 +610,7 @@ impl<'a> Decoder<'a> {
             .map(|e| e.id)
             .unwrap_or(0);
 
-        // Compute offsets by projecting LRP coordinates onto first/last decoded edges
+        // Spec deviation: same as decode_line — projection-based offsets instead of binary.
         let (
             positive_offset_m,
             negative_offset_m,
