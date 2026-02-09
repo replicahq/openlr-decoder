@@ -402,16 +402,16 @@ fn process_batch(
             let geom_with_metrics = linestring_with_metrics(geom);
 
             // Create edge with pre-computed metrics (no redundant computation)
-            let edge = Edge::from_precomputed(
-                edge_id,
-                geom_with_metrics.geometry,
+            let edge = Edge {
+                id: edge_id,
+                geometry: geom_with_metrics.geometry,
                 frc,
                 fow,
-                geom_with_metrics.length_m,
-                geom_with_metrics.bearing_start,
-                geom_with_metrics.bearing_end,
-                Frc::is_access_road(hw_tag),
-            );
+                length_m: geom_with_metrics.length_m,
+                bearing_start: geom_with_metrics.bearing_start,
+                bearing_end: geom_with_metrics.bearing_end,
+                is_access_road: Frc::is_access_road(hw_tag),
+            };
 
             Some(PendingEdge { sv_id, ev_id, edge })
         })

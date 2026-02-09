@@ -42,27 +42,44 @@ impl Ord for AStarNode {
     }
 }
 
+/// Constraints for the bounded A* search beyond basic start/goal/cost.
+struct AStarConstraints {
+    /// LFRCNP filter: only traverse edges with FRC <= this value (None = no filter)
+    max_frc: Option<Frc>,
+    /// Extra cost added per slip road edge (soft preference for main roads)
+    slip_road_cost_penalty: f64,
+    /// Extra cost added per access road edge (soft preference for tertiary over residential)
+    access_road_cost_penalty: f64,
+}
+
+impl Default for AStarConstraints {
+    fn default() -> Self {
+        AStarConstraints {
+            max_frc: None,
+            slip_road_cost_penalty: 0.0,
+            access_road_cost_penalty: 0.0,
+        }
+    }
+}
+
 /// Bounded A* search that stops when path cost exceeds max_cost
 ///
-/// The optional `max_frc` parameter implements LFRCNP (Lowest FRC to Next Point) filtering
+/// The `constraints.max_frc` field implements LFRCNP (Lowest FRC to Next Point) filtering
 /// per OpenLR spec Section 12.1 Step 5. When provided, the search will only traverse edges
 /// with FRC <= max_frc (lower FRC = higher road importance).
 ///
-/// The cost penalties (`slip_road_cost_penalty`, `access_road_cost_penalty`) add soft preferences
-/// that make the search favor main roads over slip roads and tertiary over residential when paths
-/// are similar in length. The returned path length is the real (unpenalized) distance, but with
-/// non-zero penalties the path found may not be the globally shortest — the search trades minimal
-/// real-cost optimality for preferring higher-class roads.
-#[allow(clippy::too_many_arguments)]
+/// The cost penalties add soft preferences that make the search favor main roads over slip roads
+/// and tertiary over residential when paths are similar in length. The returned path length is
+/// the real (unpenalized) distance, but with non-zero penalties the path found may not be the
+/// globally shortest — the search trades minimal real-cost optimality for preferring higher-class
+/// roads.
 fn bounded_astar(
     network: &RoadNetwork,
     start: NodeIndex,
     goal: NodeIndex,
     goal_coord: Point<f64>,
     max_cost: f64,
-    max_frc: Option<Frc>,
-    slip_road_cost_penalty: f64,
-    access_road_cost_penalty: f64,
+    constraints: &AStarConstraints,
 ) -> Option<(f64, Vec<NodeIndex>, Vec<EdgeIndex>)> {
     let mut open_set = BinaryHeap::new();
     // Track both real distance (g_scores) and penalized cost (for priority)
@@ -118,7 +135,7 @@ fn bounded_astar(
             // Exception: SlipRoad (ramps/links) are always allowed regardless of FRC.
             // This handles cross-provider mapping where motorway_link is FRC3 in OSM
             // but should be traversable when connecting to/from motorways (FRC0/FRC1).
-            if let Some(max) = max_frc {
+            if let Some(max) = constraints.max_frc {
                 let is_slip_road = edge.weight().fow == Fow::SlipRoad;
                 if edge.weight().frc > max && !is_slip_road {
                     continue;
@@ -128,9 +145,9 @@ fn bounded_astar(
             let neighbor = edge.target();
             let real_edge_cost = edge.weight().length_m;
             let penalty = if edge.weight().fow == Fow::SlipRoad {
-                slip_road_cost_penalty
+                constraints.slip_road_cost_penalty
             } else if edge.weight().is_access_road {
-                access_road_cost_penalty
+                constraints.access_road_cost_penalty
             } else {
                 0.0
             };
@@ -963,9 +980,11 @@ impl<'a> Decoder<'a> {
                         end_node,
                         end_coord,
                         middle_max,
-                        max_frc_for_astar,
-                        self.config.slip_road_cost_penalty,
-                        self.config.access_road_cost_penalty,
+                        &AStarConstraints {
+                            max_frc: max_frc_for_astar,
+                            slip_road_cost_penalty: self.config.slip_road_cost_penalty,
+                            access_road_cost_penalty: self.config.access_road_cost_penalty,
+                        },
                     ) {
                         Some(result) => result,
                         None => continue,
@@ -1171,7 +1190,14 @@ mod tests {
         let goal_coord = network.node(goal).unwrap().coord;
 
         // Max cost of 500m should easily accommodate the 250m path
-        let result = bounded_astar(&network, start, goal, goal_coord, 500.0, None, 0.0, 0.0);
+        let result = bounded_astar(
+            &network,
+            start,
+            goal,
+            goal_coord,
+            500.0,
+            &AStarConstraints::default(),
+        );
 
         assert!(result.is_some(), "Should find a valid path within max_cost");
 
@@ -1209,7 +1235,14 @@ mod tests {
 
         // Max cost of 100m is less than the 250m path - should fail
         // (This mirrors Java's NO_ROUTE_FOUND_MAX_DISTANCE = 100)
-        let result = bounded_astar(&network, start, goal, goal_coord, 100.0, None, 0.0, 0.0);
+        let result = bounded_astar(
+            &network,
+            start,
+            goal,
+            goal_coord,
+            100.0,
+            &AStarConstraints::default(),
+        );
 
         assert!(
             result.is_none(),
@@ -1235,7 +1268,14 @@ mod tests {
         let goal = *network.node_id_to_index.as_ref().unwrap().get(&4).unwrap();
         let goal_coord = network.node(goal).unwrap().coord;
 
-        let result = bounded_astar(&network, start, goal, goal_coord, 1000.0, None, 0.0, 0.0);
+        let result = bounded_astar(
+            &network,
+            start,
+            goal,
+            goal_coord,
+            1000.0,
+            &AStarConstraints::default(),
+        );
         assert!(result.is_some());
 
         let (cost, nodes, _edges) = result.unwrap();
@@ -1281,7 +1321,14 @@ mod tests {
         let goal = *network.node_id_to_index.as_ref().unwrap().get(&4).unwrap();
         let goal_coord = network.node(goal).unwrap().coord;
 
-        let result = bounded_astar(&network, start, goal, goal_coord, 500.0, None, 0.0, 0.0);
+        let result = bounded_astar(
+            &network,
+            start,
+            goal,
+            goal_coord,
+            500.0,
+            &AStarConstraints::default(),
+        );
         assert!(result.is_some());
 
         let (cost, nodes, _edges) = result.unwrap();
@@ -1327,9 +1374,10 @@ mod tests {
             goal,
             goal_coord,
             200.0,
-            Some(Frc::Frc3),
-            0.0,
-            0.0,
+            &AStarConstraints {
+                max_frc: Some(Frc::Frc3),
+                ..AStarConstraints::default()
+            },
         )
         .unwrap();
         let (_, _, edges) = result;
@@ -1358,7 +1406,14 @@ mod tests {
         let goal = start; // Same node
         let goal_coord = network.node(goal).unwrap().coord;
 
-        let result = bounded_astar(&network, start, goal, goal_coord, 100.0, None, 0.0, 0.0);
+        let result = bounded_astar(
+            &network,
+            start,
+            goal,
+            goal_coord,
+            100.0,
+            &AStarConstraints::default(),
+        );
         assert!(result.is_some());
 
         let (cost, nodes, _edges) = result.unwrap();
@@ -1384,7 +1439,14 @@ mod tests {
         let goal = *network.node_id_to_index.as_ref().unwrap().get(&4).unwrap(); // In different component
         let goal_coord = network.node(goal).unwrap().coord;
 
-        let result = bounded_astar(&network, start, goal, goal_coord, 10000.0, None, 0.0, 0.0);
+        let result = bounded_astar(
+            &network,
+            start,
+            goal,
+            goal_coord,
+            10000.0,
+            &AStarConstraints::default(),
+        );
 
         assert!(
             result.is_none(),
@@ -1426,8 +1488,14 @@ mod tests {
         let goal_coord = network.node(goal).unwrap().coord;
 
         // Without LFRCNP: should find shorter path via node 3 (150m)
-        let result_no_filter =
-            bounded_astar(&network, start, goal, goal_coord, 500.0, None, 0.0, 0.0);
+        let result_no_filter = bounded_astar(
+            &network,
+            start,
+            goal,
+            goal_coord,
+            500.0,
+            &AStarConstraints::default(),
+        );
         assert!(result_no_filter.is_some());
         let (cost_no_filter, _, _) = result_no_filter.unwrap();
         assert!(
@@ -1443,9 +1511,10 @@ mod tests {
             goal,
             goal_coord,
             500.0,
-            Some(Frc::Frc2),
-            0.0,
-            0.0,
+            &AStarConstraints {
+                max_frc: Some(Frc::Frc2),
+                ..AStarConstraints::default()
+            },
         );
         assert!(
             result_filtered.is_some(),
@@ -1494,9 +1563,10 @@ mod tests {
             goal,
             goal_coord,
             500.0,
-            Some(Frc::Frc7),
-            0.0,
-            0.0,
+            &AStarConstraints {
+                max_frc: Some(Frc::Frc7),
+                ..AStarConstraints::default()
+            },
         );
         assert!(result.is_some());
         let (cost, _, _) = result.unwrap();
@@ -1528,9 +1598,10 @@ mod tests {
             goal,
             goal_coord,
             500.0,
-            Some(Frc::Frc3),
-            0.0,
-            0.0,
+            &AStarConstraints {
+                max_frc: Some(Frc::Frc3),
+                ..AStarConstraints::default()
+            },
         );
         assert!(
             result.is_none(),
@@ -1538,8 +1609,14 @@ mod tests {
         );
 
         // But without filtering, path should exist
-        let result_unfiltered =
-            bounded_astar(&network, start, goal, goal_coord, 500.0, None, 0.0, 0.0);
+        let result_unfiltered = bounded_astar(
+            &network,
+            start,
+            goal,
+            goal_coord,
+            500.0,
+            &AStarConstraints::default(),
+        );
         assert!(
             result_unfiltered.is_some(),
             "Without LFRCNP, path should exist"
@@ -1577,8 +1654,14 @@ mod tests {
         let goal_coord = network.node(goal).unwrap().coord;
 
         // Without penalty: should find shorter slip road path (100m)
-        let result_no_penalty =
-            bounded_astar(&network, start, goal, goal_coord, 500.0, None, 0.0, 0.0);
+        let result_no_penalty = bounded_astar(
+            &network,
+            start,
+            goal,
+            goal_coord,
+            500.0,
+            &AStarConstraints::default(),
+        );
         assert!(result_no_penalty.is_some());
         let (cost_no_penalty, nodes_no_penalty, _) = result_no_penalty.unwrap();
         assert!(
@@ -1589,8 +1672,17 @@ mod tests {
 
         // With 25m penalty per slip road: slip road path effective cost = 100 + 25*2 = 150m
         // Main road path stays at 120m, so should be preferred
-        let result_with_penalty =
-            bounded_astar(&network, start, goal, goal_coord, 500.0, None, 25.0, 0.0);
+        let result_with_penalty = bounded_astar(
+            &network,
+            start,
+            goal,
+            goal_coord,
+            500.0,
+            &AStarConstraints {
+                slip_road_cost_penalty: 25.0,
+                ..AStarConstraints::default()
+            },
+        );
         assert!(result_with_penalty.is_some());
         let (cost_with_penalty, nodes_with_penalty, _) = result_with_penalty.unwrap();
         assert!(
@@ -1628,7 +1720,17 @@ mod tests {
 
         // Even with penalty, the returned cost should be the REAL path length (100m)
         // Penalty only affects search priority, not the returned path length
-        let result = bounded_astar(&network, start, goal, goal_coord, 500.0, None, 50.0, 0.0);
+        let result = bounded_astar(
+            &network,
+            start,
+            goal,
+            goal_coord,
+            500.0,
+            &AStarConstraints {
+                slip_road_cost_penalty: 50.0,
+                ..AStarConstraints::default()
+            },
+        );
         assert!(result.is_some());
         let (cost, _, _) = result.unwrap();
 
@@ -1663,8 +1765,14 @@ mod tests {
         let goal_coord = network.node(goal).unwrap().coord;
 
         // Without penalty: should find shorter access road path (100m)
-        let result_no_penalty =
-            bounded_astar(&network, start, goal, goal_coord, 500.0, None, 0.0, 0.0);
+        let result_no_penalty = bounded_astar(
+            &network,
+            start,
+            goal,
+            goal_coord,
+            500.0,
+            &AStarConstraints::default(),
+        );
         assert!(result_no_penalty.is_some());
         let (cost_no_penalty, _, _) = result_no_penalty.unwrap();
         assert!(
@@ -1675,8 +1783,17 @@ mod tests {
 
         // With 15m penalty per access road edge: effective cost = 100 + 15*2 = 130m
         // Tertiary path stays at 120m, so should be preferred
-        let result_with_penalty =
-            bounded_astar(&network, start, goal, goal_coord, 500.0, None, 0.0, 15.0);
+        let result_with_penalty = bounded_astar(
+            &network,
+            start,
+            goal,
+            goal_coord,
+            500.0,
+            &AStarConstraints {
+                access_road_cost_penalty: 15.0,
+                ..AStarConstraints::default()
+            },
+        );
         assert!(result_with_penalty.is_some());
         let (cost_with_penalty, nodes_with_penalty, _) = result_with_penalty.unwrap();
         assert!(
