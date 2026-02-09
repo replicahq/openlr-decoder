@@ -134,6 +134,26 @@ pub struct PyDecoderConfig {
     /// Maximum search distance factor
     #[pyo3(get, set)]
     pub max_search_distance_factor: f64,
+    /// Scoring weight for distance (higher = distance matters more)
+    #[pyo3(get, set)]
+    pub distance_weight: f64,
+    /// Scoring weight for bearing difference
+    #[pyo3(get, set)]
+    pub bearing_weight: f64,
+    /// Scoring weight for FRC difference
+    #[pyo3(get, set)]
+    pub frc_weight: f64,
+    /// Scoring weight for FOW compatibility
+    #[pyo3(get, set)]
+    pub fow_weight: f64,
+    /// Cost penalty in meters for traversing slip roads (ramps/links) in A* search.
+    /// Makes decoder prefer main roads over slip roads. Default 20m.
+    #[pyo3(get, set)]
+    pub slip_road_cost_penalty: f64,
+    /// Cost penalty in meters for traversing access/local roads (residential, living_street,
+    /// service, track) in A* search. Makes decoder prefer tertiary over residential. Default 10m.
+    #[pyo3(get, set)]
+    pub access_road_cost_penalty: f64,
 }
 
 #[pymethods]
@@ -143,13 +163,19 @@ impl PyDecoderConfig {
     #[new]
     #[pyo3(signature = (
         search_radius_m = 100.0,
-        max_bearing_diff = 30.0,
-        frc_tolerance = 3,
+        max_bearing_diff = 90.0,
+        frc_tolerance = 2,
         max_candidates = 10,
         max_candidate_distance_m = 35.0,
         length_tolerance = 0.35,
         absolute_length_tolerance = 100.0,
-        max_search_distance_factor = 2.0
+        max_search_distance_factor = 2.0,
+        distance_weight = 10.0,
+        bearing_weight = 0.2,
+        frc_weight = 0.1,
+        fow_weight = 0.1,
+        slip_road_cost_penalty = 20.0,
+        access_road_cost_penalty = 10.0
     ))]
     fn new(
         search_radius_m: f64,
@@ -160,6 +186,12 @@ impl PyDecoderConfig {
         length_tolerance: f64,
         absolute_length_tolerance: f64,
         max_search_distance_factor: f64,
+        distance_weight: f64,
+        bearing_weight: f64,
+        frc_weight: f64,
+        fow_weight: f64,
+        slip_road_cost_penalty: f64,
+        access_road_cost_penalty: f64,
     ) -> Self {
         PyDecoderConfig {
             search_radius_m,
@@ -170,6 +202,12 @@ impl PyDecoderConfig {
             length_tolerance,
             absolute_length_tolerance,
             max_search_distance_factor,
+            distance_weight,
+            bearing_weight,
+            frc_weight,
+            fow_weight,
+            slip_road_cost_penalty,
+            access_road_cost_penalty,
         }
     }
 
@@ -177,7 +215,9 @@ impl PyDecoderConfig {
         format!(
             "DecoderConfig(search_radius_m={}, max_bearing_diff={}, frc_tolerance={}, \
              max_candidates={}, max_candidate_distance_m={}, length_tolerance={}, \
-             absolute_length_tolerance={}, max_search_distance_factor={})",
+             absolute_length_tolerance={}, max_search_distance_factor={}, \
+             distance_weight={}, bearing_weight={}, frc_weight={}, fow_weight={}, \
+             slip_road_cost_penalty={}, access_road_cost_penalty={})",
             self.search_radius_m,
             self.max_bearing_diff,
             self.frc_tolerance,
@@ -185,7 +225,13 @@ impl PyDecoderConfig {
             self.max_candidate_distance_m,
             self.length_tolerance,
             self.absolute_length_tolerance,
-            self.max_search_distance_factor
+            self.max_search_distance_factor,
+            self.distance_weight,
+            self.bearing_weight,
+            self.frc_weight,
+            self.fow_weight,
+            self.slip_road_cost_penalty,
+            self.access_road_cost_penalty
         )
     }
 }
@@ -199,11 +245,16 @@ impl From<&PyDecoderConfig> for DecoderConfig {
                 frc_tolerance: config.frc_tolerance,
                 max_candidates: config.max_candidates,
                 max_candidate_distance_m: config.max_candidate_distance_m,
-                ..CandidateConfig::default()
+                distance_weight: config.distance_weight,
+                bearing_weight: config.bearing_weight,
+                frc_weight: config.frc_weight,
+                fow_weight: config.fow_weight,
             },
             length_tolerance: config.length_tolerance,
             absolute_length_tolerance: config.absolute_length_tolerance,
             max_search_distance_factor: config.max_search_distance_factor,
+            slip_road_cost_penalty: config.slip_road_cost_penalty,
+            access_road_cost_penalty: config.access_road_cost_penalty,
         }
     }
 }
@@ -217,12 +268,18 @@ pub struct PyDecodedPath {
     /// Total path length in meters
     #[pyo3(get)]
     pub length: f64,
-    /// Positive offset (trim from start) in meters
+    /// Distance from start of first edge to first LRP projection (trim from start) in meters
     #[pyo3(get)]
     pub positive_offset: f64,
-    /// Negative offset (trim from end) in meters
+    /// Distance from last LRP projection to end of last edge (trim from end) in meters
     #[pyo3(get)]
     pub negative_offset: f64,
+    /// Fraction along first edge where first LRP projects (0.0-1.0)
+    #[pyo3(get)]
+    pub positive_offset_fraction: f64,
+    /// Fraction along last edge where last LRP projects (0.0-1.0, measured from end)
+    #[pyo3(get)]
+    pub negative_offset_fraction: f64,
     /// The edge ID that covers the most distance in the decoded path
     #[pyo3(get)]
     pub primary_edge_id: u64,
@@ -253,6 +310,8 @@ impl From<DecodedPath> for PyDecodedPath {
             length: path.length_m,
             positive_offset: path.positive_offset_m,
             negative_offset: path.negative_offset_m,
+            positive_offset_fraction: path.positive_offset_fraction,
+            negative_offset_fraction: path.negative_offset_fraction,
             primary_edge_id: path.primary_edge_id,
             primary_edge_coverage: path.primary_edge_coverage_m,
         }
@@ -314,8 +373,10 @@ impl PyDecoder {
     ///     PyArrow RecordBatch with columns:
     ///     - edge_ids: list<uint64> - edge IDs for each decoded path
     ///     - length: float64 - path length in meters
-    ///     - positive_offset: float64 - positive offset in meters
-    ///     - negative_offset: float64 - negative offset in meters
+    ///     - positive_offset: float64 - distance from first edge start to first LRP projection (meters)
+    ///     - negative_offset: float64 - distance from last LRP projection to last edge end (meters)
+    ///     - positive_offset_fraction: float64 - fraction along first edge where first LRP projects (0-1)
+    ///     - negative_offset_fraction: float64 - fraction along last edge from last LRP to edge end (0-1)
     ///     - primary_edge_id: uint64 - edge ID covering the most distance
     ///     - primary_edge_coverage: float64 - distance covered by primary edge in meters
     ///     - error: string (nullable) - error message if decode failed, null if succeeded
@@ -340,6 +401,8 @@ impl PyDecoder {
         let mut length_builder = Float64Builder::new();
         let mut pos_offset_builder = Float64Builder::new();
         let mut neg_offset_builder = Float64Builder::new();
+        let mut pos_offset_frac_builder = Float64Builder::new();
+        let mut neg_offset_frac_builder = Float64Builder::new();
         let mut primary_edge_id_builder = UInt64Builder::new();
         let mut primary_edge_coverage_builder = Float64Builder::new();
         let mut error_builder = StringBuilder::new();
@@ -357,6 +420,8 @@ impl PyDecoder {
                     length_builder.append_value(path.length_m);
                     pos_offset_builder.append_value(path.positive_offset_m);
                     neg_offset_builder.append_value(path.negative_offset_m);
+                    pos_offset_frac_builder.append_value(path.positive_offset_fraction);
+                    neg_offset_frac_builder.append_value(path.negative_offset_fraction);
                     primary_edge_id_builder.append_value(path.primary_edge_id);
                     primary_edge_coverage_builder.append_value(path.primary_edge_coverage_m);
                     error_builder.append_null();
@@ -367,6 +432,8 @@ impl PyDecoder {
                     length_builder.append_null();
                     pos_offset_builder.append_null();
                     neg_offset_builder.append_null();
+                    pos_offset_frac_builder.append_null();
+                    neg_offset_frac_builder.append_null();
                     primary_edge_id_builder.append_null();
                     primary_edge_coverage_builder.append_null();
                     error_builder.append_value(decode_error_message(e));
@@ -378,6 +445,8 @@ impl PyDecoder {
         let length: ArrayRef = Arc::new(length_builder.finish());
         let positive_offset: ArrayRef = Arc::new(pos_offset_builder.finish());
         let negative_offset: ArrayRef = Arc::new(neg_offset_builder.finish());
+        let positive_offset_fraction: ArrayRef = Arc::new(pos_offset_frac_builder.finish());
+        let negative_offset_fraction: ArrayRef = Arc::new(neg_offset_frac_builder.finish());
         let primary_edge_id: ArrayRef = Arc::new(primary_edge_id_builder.finish());
         let primary_edge_coverage: ArrayRef = Arc::new(primary_edge_coverage_builder.finish());
         let error: ArrayRef = Arc::new(error_builder.finish());
@@ -387,6 +456,8 @@ impl PyDecoder {
             ("length", length),
             ("positive_offset", positive_offset),
             ("negative_offset", negative_offset),
+            ("positive_offset_fraction", positive_offset_fraction),
+            ("negative_offset_fraction", negative_offset_fraction),
             ("primary_edge_id", primary_edge_id),
             ("primary_edge_coverage", primary_edge_coverage),
             ("error", error),

@@ -51,34 +51,40 @@ The core problem: A HERE OpenLR code encodes a location as a sequence of **Locat
 Each LRP has:
 - **Coordinate**: lat/lon position
 - **Bearing**: direction of travel in degrees (0-360)
-- **FRC**: Functional Road Class (0=motorway ... 7=other)
+- **FRC**: Functional Road Class (0-indexed: 0=highest importance ... 4=lowest, for HERE)
 - **FOW**: Form of Way (motorway, slip road, roundabout, etc.)
 - **DNP**: Distance to Next Point (meters, only on non-terminal LRPs)
 - **LFRCNP**: Lowest FRC to Next Point
 
 ### Functional Road Class (FRC)
 
-HERE uses a 5-level Functional Class (FC1–FC5) to classify roads by importance. OpenLR's binary format has 3 bits for FRC (values 0–7), but HERE only uses FRC0–FRC4. The mapping is FC1→FRC0, FC2→FRC1, ..., FC5→FRC4.
+**Two numbering systems:**
+- **HERE**: Uses 1-indexed Functional Class (FC1–FC5), where FC1 is highest importance
+- **OpenLR**: Encodes these as 0-indexed FRC values (0–7), where FRC0 is highest importance
+
+**The mapping:** HERE's FC1→FRC0, FC2→FRC1, FC3→FRC2, FC4→FRC3, FC5→FRC4
+
+OpenLR's binary format has 3 bits for FRC (values 0–7), but HERE only uses FRC0–FRC4:
 
 ```
-FRC0 (HERE FC1) = Major highways, interstates (highest importance)
-FRC1 (HERE FC2) = Primary routes between / through cities
-FRC2 (HERE FC3) = Secondary routes between minor cities / towns
-FRC3 (HERE FC4) = Local connecting routes between villages
-FRC4 (HERE FC5) = Local / neighborhood roads (lowest importance)
-FRC5–FRC7       = Not used by HERE
+FRC0 = Motorways, controlled-access highways (highest importance) [HERE: FC1]
+FRC1 = Major routes for travel between/through cities            [HERE: FC2]
+FRC2 = High volume roads interconnecting with major routes        [HERE: FC3]
+FRC3 = Moderate speed roads between neighborhoods                 [HERE: FC4]
+FRC4 = Local/residential roads (lowest importance)                [HERE: FC5]
+FRC5–FRC7 = Not used by HERE
 ```
 
-The loader maps OSM `highway` tags into the HERE FRC0–FRC4 range:
+The loader maps OSM `highway` tags into the FRC0–FRC4 range:
 
-| FRC (HERE FC) | OSM highway tags |
-|---------------|-----------------|
-| FRC0 (FC1) | `motorway` |
-| FRC1 (FC2) | `trunk` |
-| FRC2 (FC3) | `primary` |
-| FRC3 (FC4) | `secondary`, `motorway_link`, `trunk_link`, `primary_link` |
-| FRC4 (FC5) | `tertiary`, `secondary_link`, `tertiary_link`, `unclassified`, `residential`, `living_street`, `service`, `track` |
-| FRC7 | everything else (non-navigable, won't match any HERE LRP) |
+| FRC Value | HERE FC | OSM highway tags |
+|-----------|---------|------------------|
+| FRC0 | FC1 | `motorway` |
+| FRC1 | FC2 | `trunk` |
+| FRC2 | FC3 | `primary` |
+| FRC3 | FC4 | `secondary`, `motorway_link`, `trunk_link`, `primary_link` |
+| FRC4 | FC5 | `tertiary`, `secondary_link`, `tertiary_link`, `unclassified`, `residential`, `living_street`, `service`, `track` |
+| FRC7 | — | everything else (non-navigable, won't match any HERE LRP) |
 
 ### Form of Way (FOW)
 
@@ -152,7 +158,7 @@ The app shows:
 
 ### Debugging Approach
 
-1. Never manually decode OpenLR references using custom code: only use the Python or Rust libraries.
+1. IMPORTANT: Never manually decode OpenLR references using custom code: only use the Python or Rust libraries.
 2. **Visualize the LRPs**: See where they land on the map
 3. **Check candidate edges**: Are the correct roads being found?
 4. **Verify connectivity**: Can A* find a path between candidate pairs?

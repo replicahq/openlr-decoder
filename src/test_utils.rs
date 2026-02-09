@@ -41,6 +41,7 @@ struct PendingEdge {
     length_m: Option<f64>, // If None, calculated from geometry
     frc: Frc,
     fow: Fow,
+    is_access_road: bool,
 }
 
 impl TestNetworkBuilder {
@@ -97,6 +98,29 @@ impl TestNetworkBuilder {
             length_m: Some(length_m),
             frc,
             fow,
+            is_access_road: false,
+        });
+        self
+    }
+
+    /// Add an access road edge (residential/service/etc.) with explicit length.
+    pub fn add_access_road(
+        mut self,
+        id: u64,
+        start_node: i64,
+        end_node: i64,
+        length_m: f64,
+        frc: Frc,
+        fow: Fow,
+    ) -> Self {
+        self.edges.push(PendingEdge {
+            id,
+            start_node,
+            end_node,
+            length_m: Some(length_m),
+            frc,
+            fow,
+            is_access_road: true,
         });
         self
     }
@@ -127,6 +151,7 @@ impl TestNetworkBuilder {
             length_m: None, // Will be calculated from geometry
             frc,
             fow,
+            is_access_road: false,
         });
         self
     }
@@ -173,6 +198,7 @@ impl TestNetworkBuilder {
 
             // Create edge - Edge::new will compute bearings (move geometry, no clone)
             let mut edge = Edge::new(pending.id, geometry, pending.frc, pending.fow);
+            edge.is_access_road = pending.is_access_road;
 
             // Override length if explicitly provided
             if let Some(length) = pending.length_m {

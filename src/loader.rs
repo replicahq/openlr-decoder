@@ -402,15 +402,16 @@ fn process_batch(
             let geom_with_metrics = linestring_with_metrics(geom);
 
             // Create edge with pre-computed metrics (no redundant computation)
-            let edge = Edge::from_precomputed(
-                edge_id,
-                geom_with_metrics.geometry,
+            let edge = Edge {
+                id: edge_id,
+                geometry: geom_with_metrics.geometry,
                 frc,
                 fow,
-                geom_with_metrics.length_m,
-                geom_with_metrics.bearing_start,
-                geom_with_metrics.bearing_end,
-            );
+                length_m: geom_with_metrics.length_m,
+                bearing_start: geom_with_metrics.bearing_start,
+                bearing_end: geom_with_metrics.bearing_end,
+                is_access_road: Frc::is_access_road(hw_tag),
+            };
 
             Some(PendingEdge { sv_id, ev_id, edge })
         })
@@ -618,7 +619,9 @@ mod tests {
     #[test]
     fn test_frc_highway_mapping() {
         assert_eq!(Frc::from_osm_highway("motorway"), Frc::Frc0);
+        assert_eq!(Frc::from_osm_highway("tertiary"), Frc::Frc4);
         assert_eq!(Frc::from_osm_highway("residential"), Frc::Frc4);
+        assert_eq!(Frc::from_osm_highway("service"), Frc::Frc4);
     }
 
     #[test]
