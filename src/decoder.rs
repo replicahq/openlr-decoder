@@ -681,21 +681,21 @@ impl<'a> Decoder<'a> {
         let mut best_same_edge: Option<(EdgeIndex, f64, f64)> = None; // (edge_idx, length, score)
 
         for start_cand in start_candidates.iter().take(10) {
-            if start_cand.distance_m > MAX_PROJECTION_DISTANCE {
-                continue;
-            }
-
             for end_cand in end_candidates.iter().take(10) {
-                if end_cand.distance_m > MAX_PROJECTION_DISTANCE {
-                    continue;
-                }
-
                 // Check if same edge
                 if start_cand.edge_idx != end_cand.edge_idx {
                     continue;
                 }
 
                 let edge = self.network.edge(start_cand.edge_idx)?;
+
+                // Distance filter
+                if start_cand.distance_m > MAX_PROJECTION_DISTANCE {
+                    continue;
+                }
+                if end_cand.distance_m > MAX_PROJECTION_DISTANCE {
+                    continue;
+                }
 
                 // Check LFRCNP constraint (SlipRoads always allowed)
                 if let Some(max) = max_frc {
@@ -789,11 +789,13 @@ impl<'a> Decoder<'a> {
         let max_search_distance =
             (expected_distance * self.config.max_search_distance_factor).max(500.0);
 
-        // PRIORITY CHECK: Look for same-edge solutions with strict LFRCNP first
-        // When both LRPs project closely onto the same edge, prefer this simpler solution
-        // over multi-edge paths that may score slightly better on individual candidates
-        // but include edges contributing nearly zero length.
-        if let Some((result, _score)) = self.try_same_edge_solution(
+        let mut best_path: Option<PathResult> = None;
+        let mut best_score = f64::MAX;
+
+        // Check for same-edge solutions with strict LFRCNP.
+        // When both LRPs project closely onto the same edge, this is often the best solution.
+        // We set it as the initial best but let both passes compete on score.
+        if let Some((result, score)) = self.try_same_edge_solution(
             start_candidates,
             end_candidates,
             expected_distance,
@@ -801,10 +803,9 @@ impl<'a> Decoder<'a> {
             max_valid_distance,
             lfrcnp, // Strict LFRCNP
         ) {
-            return Ok(result);
+            best_path = Some(result);
+            best_score = score;
         }
-        // NOTE: Relaxed same-edge fallback is deferred until after strict A* search fails
-        // to ensure we don't bypass LFRCNP when a valid multi-edge path exists.
 
         // Build and sort candidate pairs by combined score (multiplicative)
         // Multiplicative scoring strongly penalizes pairs where either candidate is poor
@@ -820,18 +821,11 @@ impl<'a> Decoder<'a> {
         // Sort by combined score (lower is better)
         pairs.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap());
 
-        let mut best_path: Option<PathResult> = None;
-        let mut best_score = f64::MAX;
-
-        // Two-pass approach for LFRCNP: try strict first, then fallback to relaxed
-        // This prevents mixing valid FRC edges with invalid ones (e.g., taking a
-        // residential detour when a primary road path exists within LFRCNP)
+        // Two-pass approach for LFRCNP: try strict first, then relaxed.
+        // Both passes run and compete on score — the relaxed pass (LFRCNP+1) handles
+        // cross-provider FRC mapping differences where HERE's classification doesn't
+        // align with our OSM mapping.
         for use_relaxed_lfrcnp in [false, true] {
-            // If we found a path in strict pass, skip relaxed pass
-            if use_relaxed_lfrcnp && best_path.is_some() {
-                break;
-            }
-
             // In relaxed pass, also try same-edge solution with relaxed LFRCNP
             // This is deferred from earlier to ensure strict multi-edge paths are tried first
             if use_relaxed_lfrcnp {
@@ -1119,7 +1113,7 @@ mod tests {
             bearing_diff: 0.0,
             frc_diff: 0,
             fow_score: 1.0,
-            score: 0.1, // Would normally be preferred without LFRCNP filter
+            score: 0.5, // FRC4 has worse FRC match → higher score
             projection_fraction: 0.0,
         };
         let allowed_candidate = Candidate {
@@ -1128,7 +1122,7 @@ mod tests {
             bearing_diff: 0.0,
             frc_diff: 0,
             fow_score: 1.0,
-            score: 1.0,
+            score: 0.3, // FRC3 matches LFRCNP → better score
             projection_fraction: 0.0,
         };
         let end_candidate = Candidate {
