@@ -206,10 +206,43 @@ cargo test
 maturin develop --release
 
 # Run visualization app
-cd ~/openlr_benchmark
+cd ~/openlr-web
 uv sync
 uv run uvicorn app:app
 ```
+
+## QA Benchmarking
+
+The `qa/` directory contains tooling for measuring decode quality across a 48K-code corpus from the Kansas City metro area. It compares decoded OSM paths against HERE reference geometries using Hausdorff and Fréchet distance.
+
+**IMPORTANT**: The benchmark must use `~/openlr-web/.venv/bin/python` directly — do NOT use `uv run` from the openlr-web directory, as it will reinstall openlr-decoder from PyPI and overwrite your local build.
+
+### Workflow
+
+```bash
+# 1. Build the version you want to test and install into the openlr-web venv
+maturin build --release -i python3.12
+cd ~/openlr-web && uv pip install --reinstall ~/openlr-decoder/target/wheels/openlr_decoder-*-cp312-*.whl
+
+# 2. Run benchmark (saves results keyed by commit hash)
+~/openlr-web/.venv/bin/python qa/benchmark.py \
+  --save qa/results/$(git rev-parse --short HEAD).parquet
+
+# 3. Compare two runs
+~/openlr-web/.venv/bin/python qa/benchmark.py \
+  --diff qa/results/BEFORE.parquet qa/results/AFTER.parquet
+```
+
+### What the diff report shows
+
+- **Winners/Losers**: codes where Hausdorff distance improved/worsened by >5m
+- **Quality buckets**: good (<30m), ok (30–100m), bad (>100m) and transitions between them
+- **Top regressions**: specific codes that got worse — inspect these in the visualization app
+- Hausdorff/Fréchet p50/p90 aggregate trends
+
+### Test corpus
+
+`qa/test_codes.csv` contains ~48K OpenLR codes with HERE reference geometries (from `bqutils.geo.openlr_to_geography`), randomly sampled from `model-159019.michelin.arity_link_matches_usa_v2` within the KC bounding box (38.53–39.11°N, 95.15–94.47°W). Network: `openlr_test_edges.parquet` (458K edges).
 
 ## Parquet Schema (Network Input)
 
