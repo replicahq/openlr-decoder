@@ -1778,4 +1778,61 @@ mod tests {
             "With penalty, path should use tertiary road (node 3)"
         );
     }
+
+    /// Test that same-edge solutions with excellent spatial match relax the min_distance floor.
+    /// This verifies the fix in commit 9e13bcb.
+    #[test]
+    fn test_same_edge_short_path_relaxed_min_distance() {
+        // Build a simple network with one 5m edge
+        let (network, spatial) = TestNetworkBuilder::new()
+            .add_node(1, 0.0, 0.0)
+            .add_node(2, 0.000045, 0.0)
+            .add_edge(100, 1, 2, 5.0, Frc::Frc3, Fow::SingleCarriageway)
+            .build();
+
+        let decoder = Decoder::new(&network, &spatial);
+
+        let edge_idx = *network.edge_id_to_index.as_ref().unwrap().get(&100).unwrap();
+
+        // Start candidate: near start of edge
+        let start_cand = Candidate {
+            edge_idx,
+            distance_m: 2.0, // < 5.0m "excellent match"
+            bearing_diff: 0.0,
+            frc_diff: 0,
+            fow_score: 1.0,
+            score: 0.0,
+            projection_fraction: 0.1,
+        };
+
+        // End candidate: near end of edge
+        let end_cand = Candidate {
+            edge_idx,
+            distance_m: 2.0, // < 5.0m "excellent match"
+            bearing_diff: 0.0,
+            frc_diff: 0,
+            fow_score: 1.0,
+            score: 0.0,
+            projection_fraction: 0.9,
+        };
+
+        // path_cost = edge.length_m * (0.9 - 0.1) = 5.0 * 0.8 = 4.0m
+        // min_distance would normally be 10.0 (default floor)
+
+        let start_candidates = vec![start_cand];
+        let end_candidates = vec![end_cand];
+
+        // Use an expected distance of 5.0m
+        let result = decoder.find_best_path(&start_candidates, &end_candidates, 5.0, 0, None);
+
+        assert!(
+            result.is_ok(),
+            "Should find a path even if shorter than 10m floor because of excellent spatial match. Error: {:?}",
+            result.err()
+        );
+        let path = result.unwrap();
+        assert_eq!(path.edges.len(), 1);
+        assert_eq!(path.edges[0], edge_idx);
+        assert!((path.total_length - 4.0).abs() < 0.1);
+    }
 }
