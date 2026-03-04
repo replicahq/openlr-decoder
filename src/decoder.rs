@@ -1792,7 +1792,12 @@ mod tests {
 
         let decoder = Decoder::new(&network, &spatial);
 
-        let edge_idx = *network.edge_id_to_index.as_ref().unwrap().get(&100).unwrap();
+        let edge_idx = *network
+            .edge_id_to_index
+            .as_ref()
+            .unwrap()
+            .get(&100)
+            .unwrap();
 
         // Start candidate: near start of edge
         let start_cand = Candidate {
