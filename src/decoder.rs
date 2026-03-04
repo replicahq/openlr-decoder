@@ -713,15 +713,19 @@ impl<'a> Decoder<'a> {
 
                 let path_cost = edge.length_m * frac_diff;
 
-                // For same-edge with excellent spatial match, allow relaxed length tolerance
+                // For same-edge with excellent spatial match, relax both min and max
+                // length tolerances. DNP quantization can significantly overestimate
+                // short distances, and when both LRPs project very close to the edge,
+                // the spatial evidence is strong enough to trust even with large
+                // length mismatches.
                 let excellent_match = start_cand.distance_m < 5.0 && end_cand.distance_m < 5.0;
-                let effective_max = if excellent_match {
-                    max_valid_distance * 3.0
+                let (effective_min, effective_max) = if excellent_match {
+                    (0.0, max_valid_distance * 3.0)
                 } else {
-                    max_valid_distance
+                    (min_distance, max_valid_distance)
                 };
 
-                if path_cost < min_distance || path_cost > effective_max {
+                if path_cost < effective_min || path_cost > effective_max {
                     continue;
                 }
 
@@ -862,16 +866,19 @@ impl<'a> Decoder<'a> {
                         let path_cost = edge.length_m * frac_diff;
 
                         // For same-edge case with excellent spatial matches (both < 5m),
-                        // allow more length flexibility for cross-provider decoding
+                        // allow more length flexibility for cross-provider decoding.
+                        // Both min and max are relaxed: DNP quantization can significantly
+                        // overestimate short distances, and close spatial match provides
+                        // strong enough evidence.
                         let excellent_spatial_match =
                             start_cand.distance_m < 5.0 && end_cand.distance_m < 5.0;
-                        let relaxed_max = if excellent_spatial_match {
-                            max_valid_distance * 3.0 // Allow up to 3x for very close matches
+                        let (effective_min, relaxed_max) = if excellent_spatial_match {
+                            (0.0, max_valid_distance * 3.0)
                         } else {
-                            max_valid_distance
+                            (min_distance, max_valid_distance)
                         };
 
-                        if path_cost >= min_distance && path_cost <= relaxed_max {
+                        if path_cost >= effective_min && path_cost <= relaxed_max {
                             let length_diff =
                                 (path_cost - expected_distance).abs() / expected_distance.max(1.0);
                             let score = start_cand.score + end_cand.score + length_diff;
