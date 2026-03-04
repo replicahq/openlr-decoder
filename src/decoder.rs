@@ -713,15 +713,19 @@ impl<'a> Decoder<'a> {
 
                 let path_cost = edge.length_m * frac_diff;
 
-                // For same-edge with excellent spatial match, allow relaxed length tolerance
+                // For same-edge with excellent spatial match, relax both min and max
+                // length tolerances. DNP quantization can significantly overestimate
+                // short distances, and when both LRPs project very close to the edge,
+                // the spatial evidence is strong enough to trust even with large
+                // length mismatches.
                 let excellent_match = start_cand.distance_m < 5.0 && end_cand.distance_m < 5.0;
-                let effective_max = if excellent_match {
-                    max_valid_distance * 3.0
+                let (effective_min, effective_max) = if excellent_match {
+                    (0.0, max_valid_distance * 3.0)
                 } else {
-                    max_valid_distance
+                    (min_distance, max_valid_distance)
                 };
 
-                if path_cost < min_distance || path_cost > effective_max {
+                if path_cost < effective_min || path_cost > effective_max {
                     continue;
                 }
 
@@ -862,16 +866,19 @@ impl<'a> Decoder<'a> {
                         let path_cost = edge.length_m * frac_diff;
 
                         // For same-edge case with excellent spatial matches (both < 5m),
-                        // allow more length flexibility for cross-provider decoding
+                        // allow more length flexibility for cross-provider decoding.
+                        // Both min and max are relaxed: DNP quantization can significantly
+                        // overestimate short distances, and close spatial match provides
+                        // strong enough evidence.
                         let excellent_spatial_match =
                             start_cand.distance_m < 5.0 && end_cand.distance_m < 5.0;
-                        let relaxed_max = if excellent_spatial_match {
-                            max_valid_distance * 3.0 // Allow up to 3x for very close matches
+                        let (effective_min, relaxed_max) = if excellent_spatial_match {
+                            (0.0, max_valid_distance * 3.0)
                         } else {
-                            max_valid_distance
+                            (min_distance, max_valid_distance)
                         };
 
-                        if path_cost >= min_distance && path_cost <= relaxed_max {
+                        if path_cost >= effective_min && path_cost <= relaxed_max {
                             let length_diff =
                                 (path_cost - expected_distance).abs() / expected_distance.max(1.0);
                             let score = start_cand.score + end_cand.score + length_diff;
@@ -1770,5 +1777,67 @@ mod tests {
             nodes_with_penalty.contains(&node3_idx),
             "With penalty, path should use tertiary road (node 3)"
         );
+    }
+
+    /// Test that same-edge solutions with excellent spatial match relax the min_distance floor.
+    /// This verifies the fix in commit 9e13bcb.
+    #[test]
+    fn test_same_edge_short_path_relaxed_min_distance() {
+        // Build a simple network with one 5m edge
+        let (network, spatial) = TestNetworkBuilder::new()
+            .add_node(1, 0.0, 0.0)
+            .add_node(2, 0.000045, 0.0)
+            .add_edge(100, 1, 2, 5.0, Frc::Frc3, Fow::SingleCarriageway)
+            .build();
+
+        let decoder = Decoder::new(&network, &spatial);
+
+        let edge_idx = *network
+            .edge_id_to_index
+            .as_ref()
+            .unwrap()
+            .get(&100)
+            .unwrap();
+
+        // Start candidate: near start of edge
+        let start_cand = Candidate {
+            edge_idx,
+            distance_m: 2.0, // < 5.0m "excellent match"
+            bearing_diff: 0.0,
+            frc_diff: 0,
+            fow_score: 1.0,
+            score: 0.0,
+            projection_fraction: 0.1,
+        };
+
+        // End candidate: near end of edge
+        let end_cand = Candidate {
+            edge_idx,
+            distance_m: 2.0, // < 5.0m "excellent match"
+            bearing_diff: 0.0,
+            frc_diff: 0,
+            fow_score: 1.0,
+            score: 0.0,
+            projection_fraction: 0.9,
+        };
+
+        // path_cost = edge.length_m * (0.9 - 0.1) = 5.0 * 0.8 = 4.0m
+        // min_distance would normally be 10.0 (default floor)
+
+        let start_candidates = vec![start_cand];
+        let end_candidates = vec![end_cand];
+
+        // Use an expected distance of 5.0m
+        let result = decoder.find_best_path(&start_candidates, &end_candidates, 5.0, 0, None);
+
+        assert!(
+            result.is_ok(),
+            "Should find a path even if shorter than 10m floor because of excellent spatial match. Error: {:?}",
+            result.err()
+        );
+        let path = result.unwrap();
+        assert_eq!(path.edges.len(), 1);
+        assert_eq!(path.edges[0], edge_idx);
+        assert!((path.total_length - 4.0).abs() < 0.1);
     }
 }
