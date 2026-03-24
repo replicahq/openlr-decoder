@@ -123,10 +123,10 @@ Key design decisions driven by this:
 
 ### Visualization Web App
 
-The `~/openlr_benchmark` repo contains a FastAPI visualization app for debugging:
+The `openlr_web` repo contains a FastAPI visualization app for debugging:
 
 ```bash
-cd ~/openlr_benchmark
+cd ~/openlr_web
 uv run uvicorn app:app --reload
 ```
 
@@ -158,7 +158,9 @@ The app shows:
 
 ### Debugging Approach
 
-1. IMPORTANT: Never manually decode OpenLR references to LRPs using custom code: only use the Python or Rust libraries. You can decode from the command line like: `uvx --with openlr python -m openlr <base64_openlr_code>`
+1. IMPORTANT: Never manually decode OpenLR references to LRPs using custom code: only use the Python or Rust libraries.
+   - **CLI**: `uvx --with openlr python -m openlr <base64_openlr_code>`
+   - **Python**: `import openlr; ref = openlr.binary_decode("<base64_openlr_code>")` — pass the base64 string directly (not raw bytes). Returns a `LineLocationReference` with `.points` (list of `LocationReferencePoint` with lon, lat, frc, fow, bear, lfrcnp, dnp) and `.poffs`/`.noffs`.
 2. **Visualize the LRPs**: See where they land on the map
 3. **Check candidate edges**: Are the correct roads being found?
 4. **Verify connectivity**: Can A* find a path between candidate pairs?
