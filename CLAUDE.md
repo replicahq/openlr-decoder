@@ -251,8 +251,8 @@ cd ~/openlr-web && uv pip install --reinstall ~/openlr-decoder/target/wheels/ope
 | Column | Type | Description |
 |--------|------|-------------|
 | `stableEdgeId` | uint64 | Unique edge identifier |
-| `startVertex` | int64 | Start node ID |
-| `endVertex` | int64 | End node ID |
+| `startOsmNode` | int64 | Start node ID (OSM node; resolves barrier splits) |
+| `endOsmNode` | int64 | End node ID (OSM node; resolves barrier splits) |
 | `startLat`, `startLon` | float64 | Start coordinates |
 | `endLat`, `endLon` | float64 | End coordinates |
 | `highway` | string | OSM highway tag |

@@ -56,9 +56,10 @@ impl PyRoadNetwork {
     ///
     /// Args:
     ///     data: Arrow-compatible data with the road network schema.
-    ///           Must have columns: stableEdgeId (uint64), startVertex (int64),
-    ///           endVertex (int64), startLat/startLon/endLat/endLon (float64),
+    ///           Must have columns: stableEdgeId (uint64), startOsmNode (int64),
+    ///           endOsmNode (int64), startLat/startLon/endLat/endLon (float64),
     ///           highway (string). Optional: lanes (int64), geometry (binary/WKB).
+    ///           Legacy: startVertex/endVertex are accepted as fallbacks.
     ///
     /// Returns:
     ///     RoadNetwork: The loaded road network ready for decoding
