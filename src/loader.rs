@@ -57,8 +57,8 @@ struct GeometryWithMetrics {
 ///
 /// Required columns:
 /// - `stableEdgeId` (UInt64): unique edge identifier
-/// - `startVertex` (Int64): start node ID
-/// - `endVertex` (Int64): end node ID
+/// - `startOsmNode` (Int64): start node ID (OSM node, resolves barrier splits)
+/// - `endOsmNode` (Int64): end node ID (OSM node, resolves barrier splits)
 /// - `startLat`, `startLon`, `endLat`, `endLon` (Float64): endpoint coordinates
 /// - `highway` (Utf8): OSM highway tag
 ///
@@ -68,11 +68,12 @@ struct GeometryWithMetrics {
 ///   - WKB: Binary, LargeBinary, or BinaryView
 ///   - WKT: String, LargeString, or StringView
 ///   - GeoArrow native: List<Struct<x,y>> with geoarrow.linestring extension
+///
 pub fn road_network_schema() -> Schema {
     Schema::new(vec![
         Field::new("stableEdgeId", DataType::UInt64, false),
-        Field::new("startVertex", DataType::Int64, false),
-        Field::new("endVertex", DataType::Int64, false),
+        Field::new("startOsmNode", DataType::Int64, false),
+        Field::new("endOsmNode", DataType::Int64, false),
         Field::new("startLat", DataType::Float64, false),
         Field::new("startLon", DataType::Float64, false),
         Field::new("endLat", DataType::Float64, false),
@@ -87,8 +88,8 @@ pub fn road_network_schema() -> Schema {
 ///
 /// Expected columns:
 /// - stableEdgeId (STRING): unique edge identifier
-/// - startVertex (INTEGER): start node ID
-/// - endVertex (INTEGER): end node ID
+/// - startOsmNode (INTEGER): start node ID (OSM node, resolves barrier splits)
+/// - endOsmNode (INTEGER): end node ID (OSM node, resolves barrier splits)
 /// - startLat, startLon, endLat, endLon (FLOAT): endpoint coordinates
 /// - highway (STRING): OSM highway tag
 /// - lanes (INTEGER): number of lanes (optional, for FOW)
@@ -118,8 +119,8 @@ pub fn load_network_from_parquet(path: &Path) -> Result<(RoadNetwork, SpatialInd
 ///
 /// Expected columns in each batch:
 /// - `stableEdgeId` (UInt64): unique edge identifier
-/// - `startVertex` (Int64): start node ID
-/// - `endVertex` (Int64): end node ID
+/// - `startOsmNode` (Int64): start node ID (OSM node, resolves barrier splits)
+/// - `endOsmNode` (Int64): end node ID (OSM node, resolves barrier splits)
 /// - `startLat`, `startLon`, `endLat`, `endLon` (Float64): endpoint coordinates
 /// - `highway` (Utf8): OSM highway tag
 /// - `lanes` (Int64, optional): number of lanes for FOW inference
@@ -193,11 +194,11 @@ fn process_batch(
         .and_then(|c| c.as_any().downcast_ref::<UInt64Array>());
 
     let start_vertex = batch
-        .column_by_name("startVertex")
+        .column_by_name("startOsmNode")
         .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
 
     let end_vertex = batch
-        .column_by_name("endVertex")
+        .column_by_name("endOsmNode")
         .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
 
     let start_lat = batch
