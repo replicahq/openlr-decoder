@@ -188,40 +188,46 @@ fn process_batch(
     edge_envelopes: &mut Vec<EdgeEnvelope>,
     seen_nodes: &mut AHashMap<i64, Point<f64>>,
 ) -> Result<()> {
-    // Extract columns
-    let stable_edge_id = batch
-        .column_by_name("stableEdgeId")
-        .and_then(|c| c.as_any().downcast_ref::<UInt64Array>());
+    // Extract and validate required columns, providing clear errors for type mismatches
+    fn require_column<'a, T: 'static>(
+        batch: &'a RecordBatch,
+        name: &str,
+    ) -> Result<&'a T> {
+        let col = batch
+            .column_by_name(name)
+            .ok_or_else(|| anyhow!("Missing required column '{name}'"))?;
+        col.as_any()
+            .downcast_ref::<T>()
+            .ok_or_else(|| {
+                anyhow!(
+                    "Column '{name}' has type {:?}, expected {:?}",
+                    col.data_type(),
+                    std::any::type_name::<T>()
+                )
+            })
+    }
 
-    let start_vertex = batch
-        .column_by_name("startOsmNode")
-        .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
-
-    let end_vertex = batch
-        .column_by_name("endOsmNode")
-        .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
-
-    let start_lat = batch
-        .column_by_name("startLat")
-        .and_then(|c| c.as_any().downcast_ref::<Float64Array>());
-
-    let start_lon = batch
-        .column_by_name("startLon")
-        .and_then(|c| c.as_any().downcast_ref::<Float64Array>());
-
-    let end_lat = batch
-        .column_by_name("endLat")
-        .and_then(|c| c.as_any().downcast_ref::<Float64Array>());
-
-    let end_lon = batch
-        .column_by_name("endLon")
-        .and_then(|c| c.as_any().downcast_ref::<Float64Array>());
+    let stable_edge_id = require_column::<UInt64Array>(batch, "stableEdgeId")?;
+    let start_vertex = require_column::<Int64Array>(batch, "startOsmNode")?;
+    let end_vertex = require_column::<Int64Array>(batch, "endOsmNode")?;
+    let start_lat = require_column::<Float64Array>(batch, "startLat")?;
+    let start_lon = require_column::<Float64Array>(batch, "startLon")?;
+    let end_lat = require_column::<Float64Array>(batch, "endLat")?;
+    let end_lon = require_column::<Float64Array>(batch, "endLon")?;
 
     // Highway can be String, LargeString, or StringView (Polars PyCapsule uses view types)
-    let highway_col = batch.column_by_name("highway");
-    let highway_string = highway_col.and_then(|c| c.as_any().downcast_ref::<StringArray>());
-    let highway_large = highway_col.and_then(|c| c.as_any().downcast_ref::<LargeStringArray>());
-    let highway_view = highway_col.and_then(|c| c.as_any().downcast_ref::<StringViewArray>());
+    let highway_col = batch
+        .column_by_name("highway")
+        .ok_or_else(|| anyhow!("Missing required column 'highway'"))?;
+    let highway_string = highway_col.as_any().downcast_ref::<StringArray>();
+    let highway_large = highway_col.as_any().downcast_ref::<LargeStringArray>();
+    let highway_view = highway_col.as_any().downcast_ref::<StringViewArray>();
+    if highway_string.is_none() && highway_large.is_none() && highway_view.is_none() {
+        return Err(anyhow!(
+            "Column 'highway' has type {:?}, expected String, LargeString, or StringView",
+            highway_col.data_type()
+        ));
+    }
 
     let lanes = batch
         .column_by_name("lanes")
@@ -229,27 +235,6 @@ fn process_batch(
 
     // Detect geometry format: WKB (binary), WKT (string), or GeoArrow native
     let geometry_format = detect_geometry_format(batch);
-
-    // All required columns must be present (highway can be String or LargeString)
-    let (stable_edge_id, start_vertex, end_vertex, start_lat, start_lon, end_lat, end_lon) = match (
-        stable_edge_id,
-        start_vertex,
-        end_vertex,
-        start_lat,
-        start_lon,
-        end_lat,
-        end_lon,
-    ) {
-        (Some(eid), Some(sv), Some(ev), Some(slat), Some(slon), Some(elat), Some(elon)) => {
-            (eid, sv, ev, slat, slon, elat, elon)
-        }
-        _ => return Ok(()), // Skip batch if missing required columns
-    };
-
-    // Highway must be present (String, LargeString, or StringView)
-    if highway_string.is_none() && highway_large.is_none() && highway_view.is_none() {
-        return Ok(());
-    }
 
     // Pre-scan batch to collect unique node IDs and coordinates (deduplication)
     // This reduces HashMap operations from 2*num_edges to ~unique_nodes
@@ -806,5 +791,49 @@ mod tests {
 
         let format = detect_geometry_format(&batch);
         assert!(matches!(format, GeometryFormat::None));
+    }
+
+    #[test]
+    fn test_wrong_column_type_errors() {
+        use arrow::datatypes::{Field, Schema};
+
+        // Build a batch where startOsmNode/endOsmNode are strings instead of Int64
+        let schema = Schema::new(vec![
+            Field::new("stableEdgeId", DataType::UInt64, false),
+            Field::new("startOsmNode", DataType::Utf8, false),
+            Field::new("endOsmNode", DataType::Utf8, false),
+            Field::new("startLat", DataType::Float64, false),
+            Field::new("startLon", DataType::Float64, false),
+            Field::new("endLat", DataType::Float64, false),
+            Field::new("endLon", DataType::Float64, false),
+            Field::new("highway", DataType::Utf8, false),
+        ]);
+
+        let batch = RecordBatch::try_new(
+            Arc::new(schema),
+            vec![
+                Arc::new(UInt64Array::from(vec![1u64])),
+                Arc::new(StringArray::from(vec!["100"])),
+                Arc::new(StringArray::from(vec!["200"])),
+                Arc::new(Float64Array::from(vec![39.0])),
+                Arc::new(Float64Array::from(vec![-94.0])),
+                Arc::new(Float64Array::from(vec![39.1])),
+                Arc::new(Float64Array::from(vec![-94.1])),
+                Arc::new(StringArray::from(vec!["secondary"])),
+            ],
+        )
+        .unwrap();
+
+        let mut network = RoadNetwork::new();
+        let mut edge_envelopes = Vec::new();
+        let mut seen_nodes = AHashMap::new();
+
+        let result = process_batch(&batch, &mut network, &mut edge_envelopes, &mut seen_nodes);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("startOsmNode"),
+            "Error should mention the bad column, got: {err_msg}"
+        );
     }
 }
