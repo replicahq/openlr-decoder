@@ -189,22 +189,17 @@ fn process_batch(
     seen_nodes: &mut AHashMap<i64, Point<f64>>,
 ) -> Result<()> {
     // Extract and validate required columns, providing clear errors for type mismatches
-    fn require_column<'a, T: 'static>(
-        batch: &'a RecordBatch,
-        name: &str,
-    ) -> Result<&'a T> {
+    fn require_column<'a, T: 'static>(batch: &'a RecordBatch, name: &str) -> Result<&'a T> {
         let col = batch
             .column_by_name(name)
             .ok_or_else(|| anyhow!("Missing required column '{name}'"))?;
-        col.as_any()
-            .downcast_ref::<T>()
-            .ok_or_else(|| {
-                anyhow!(
-                    "Column '{name}' has type {:?}, expected {:?}",
-                    col.data_type(),
-                    std::any::type_name::<T>()
-                )
-            })
+        col.as_any().downcast_ref::<T>().ok_or_else(|| {
+            anyhow!(
+                "Column '{name}' has type {:?}, expected {:?}",
+                col.data_type(),
+                std::any::type_name::<T>()
+            )
+        })
     }
 
     let stable_edge_id = require_column::<UInt64Array>(batch, "stableEdgeId")?;
