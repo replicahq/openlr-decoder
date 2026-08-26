@@ -429,6 +429,8 @@ impl<'a> Decoder<'a> {
     /// node (Rule 4), the path is extended along the forced continuation to the first
     /// junction and the added length is folded into the corresponding offset, so the
     /// offset-trimmed geometry is unchanged while the edge set covers the whole link.
+    /// The extension is only applied if the LRP coordinate is closer to the new
+    /// terminal node than to the current one (see the guard below).
     fn finalize_path(
         &self,
         path: &mut Vec<EdgeIndex>,
@@ -462,14 +464,37 @@ impl<'a> Decoder<'a> {
             })
             .unwrap_or(0.0);
 
+        // Guard against topology asymmetry (HERE has a junction our OSM car graph
+        // lacks, so a real LRP node looks like a through-node to us): only extend if
+        // the LRP itself is closer to the new terminal node than to the current one.
+        // In genuine stop-short cases the LRP sits at the junction we extend to.
+        let lrp_prefers =
+            |lrp: Point<f64>, old_node: Option<NodeIndex>, new_node: Option<NodeIndex>| match (
+                old_node.and_then(|n| self.network.node(n)),
+                new_node.and_then(|n| self.network.node(n)),
+            ) {
+                (Some(old), Some(new)) => {
+                    lrp.haversine_distance(&new.coord) < lrp.haversine_distance(&old.coord)
+                }
+                _ => false,
+            };
+
         if let Some((tail, added_m)) = self.forward_extension(path, self.snap_cap_m(last_segment)) {
-            path.extend(tail);
-            negative_offset_m += added_m;
+            let old_node = path.last().and_then(|&e| self.network.edge_target(e));
+            let new_node = tail.last().and_then(|&e| self.network.edge_target(e));
+            if lrp_prefers(last_lrp_coord, old_node, new_node) {
+                path.extend(tail);
+                negative_offset_m += added_m;
+            }
         }
         if let Some((head, added_m)) = self.backward_extension(path, self.snap_cap_m(first_segment))
         {
-            path.splice(0..0, head);
-            positive_offset_m += added_m;
+            let old_node = path.first().and_then(|&e| self.network.edge_source(e));
+            let new_node = head.first().and_then(|&e| self.network.edge_source(e));
+            if lrp_prefers(first_lrp_coord, old_node, new_node) {
+                path.splice(0..0, head);
+                positive_offset_m += added_m;
+            }
         }
 
         let frac = |offset_m: f64, edge_idx: Option<&EdgeIndex>| {
@@ -2019,14 +2044,15 @@ mod tests {
         let (network, spatial) = snap_network();
         let decoder = Decoder::new(&network, &spatial);
 
-        // Path e1,e2 ends at N3 (invalid). Last LRP sits at the end of e2.
+        // Path e1,e2 ends at N3 (invalid). Per Rule 4 the encoder placed the last
+        // LRP at the junction N4, 15m further on — our path stopped short.
         let mut path = vec![edge_by_id(&network, 1), edge_by_id(&network, 2)];
         let n1 = network
             .node(network.edge_source(path[0]).unwrap())
             .unwrap()
             .coord;
-        let n3 = network
-            .node(network.edge_target(path[1]).unwrap())
+        let n4 = network
+            .node(network.edge_target(edge_by_id(&network, 3)).unwrap())
             .unwrap()
             .coord;
         let seg = SegmentInfo {
@@ -2034,7 +2060,7 @@ mod tests {
             expected_m: 200.0,
         };
 
-        let offsets = decoder.finalize_path(&mut path, n1, n3, seg, seg);
+        let offsets = decoder.finalize_path(&mut path, n1, n4, seg, seg);
 
         assert_eq!(
             ids(&network, &path),
@@ -2061,8 +2087,8 @@ mod tests {
             .node(network.edge_source(path[0]).unwrap())
             .unwrap()
             .coord;
-        let n3 = network
-            .node(network.edge_target(path[1]).unwrap())
+        let n4 = network
+            .node(network.edge_target(edge_by_id(&network, 3)).unwrap())
             .unwrap()
             .coord;
         let seg = SegmentInfo {
@@ -2070,7 +2096,7 @@ mod tests {
             expected_m: 200.0,
         };
 
-        let offsets = decoder.finalize_path(&mut path, n1, n3, seg, seg);
+        let offsets = decoder.finalize_path(&mut path, n1, n4, seg, seg);
         assert_eq!(ids(&network, &path), vec![1, 2]);
         assert!(offsets.negative_offset_m.abs() < 1e-6);
     }
@@ -2084,8 +2110,8 @@ mod tests {
             .node(network.edge_source(path[0]).unwrap())
             .unwrap()
             .coord;
-        let n3 = network
-            .node(network.edge_target(path[1]).unwrap())
+        let n4 = network
+            .node(network.edge_target(edge_by_id(&network, 3)).unwrap())
             .unwrap()
             .coord;
 
@@ -2094,7 +2120,7 @@ mod tests {
             length_m: 200.0,
             expected_m: 100.0,
         };
-        decoder.finalize_path(&mut path, n1, n3, short_dnp, short_dnp);
+        decoder.finalize_path(&mut path, n1, n4, short_dnp, short_dnp);
         assert_eq!(ids(&network, &path), vec![1, 2]);
 
         // Segment already at max_valid_distance (DNP 200 → max 300) → no headroom
@@ -2102,7 +2128,7 @@ mod tests {
             length_m: 295.0,
             expected_m: 200.0,
         };
-        decoder.finalize_path(&mut path, n1, n3, no_headroom, no_headroom);
+        decoder.finalize_path(&mut path, n1, n4, no_headroom, no_headroom);
         assert_eq!(ids(&network, &path), vec![1, 2]);
     }
 
@@ -2119,15 +2145,15 @@ mod tests {
             .node(network.edge_source(path[0]).unwrap())
             .unwrap()
             .coord;
-        let n3 = network
-            .node(network.edge_target(path[1]).unwrap())
+        let n4 = network
+            .node(network.edge_target(edge_by_id(&network, 3)).unwrap())
             .unwrap()
             .coord;
         let seg = SegmentInfo {
             length_m: 200.0,
             expected_m: 200.0,
         };
-        decoder.finalize_path(&mut path, n1, n3, seg, seg);
+        decoder.finalize_path(&mut path, n1, n4, seg, seg);
         assert_eq!(ids(&network, &path), vec![1, 2]);
     }
 
@@ -2136,12 +2162,11 @@ mod tests {
         let (network, spatial) = snap_network();
         let decoder = Decoder::new(&network, &spatial);
 
-        // Path e4 starts at N4 (valid). Path e3,e4? e3 starts at N3 (invalid) and
-        // its forced predecessor is e2 (100m) — too long for the cap. Use a small
-        // cap-friendly case instead: path starting at N3 with a big DNP.
+        // Path e3,e4 starts at N3 (invalid); its forced predecessor e2 (100m) leads
+        // back to the junction N2, where the first LRP sits. Needs a generous cap.
         let mut path = vec![edge_by_id(&network, 3), edge_by_id(&network, 4)];
-        let n3 = network
-            .node(network.edge_source(path[0]).unwrap())
+        let n2 = network
+            .node(network.edge_source(edge_by_id(&network, 2)).unwrap())
             .unwrap()
             .coord;
         let n5 = network
@@ -2158,7 +2183,7 @@ mod tests {
             expected_m: 1500.0, // 10% = 150m ≥ 100m
         };
 
-        let offsets = decoder.finalize_path(&mut path, n3, n5, seg, seg);
+        let offsets = decoder.finalize_path(&mut path, n2, n5, seg, seg);
         assert_eq!(
             ids(&network, &path),
             vec![2, 3, 4],
@@ -2167,6 +2192,32 @@ mod tests {
         assert!((offsets.positive_offset_m - 100.0).abs() < 1e-6);
         assert!((offsets.positive_offset_fraction - 1.0).abs() < 1e-6);
         // End N5 is a sink (valid) — untouched.
+        assert!(offsets.negative_offset_m.abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_snap_skipped_when_lrp_sits_on_through_node() {
+        // Same as test_snap_extends_end_to_valid_node..., but the last LRP is placed
+        // at N3 (the through-node) rather than at the junction N4. This models HERE
+        // having a junction at N3 that our OSM car graph lacks: extending would
+        // overshoot the LRP, so the guard must leave the path alone.
+        let (network, spatial) = snap_network();
+        let decoder = Decoder::new(&network, &spatial);
+        let mut path = vec![edge_by_id(&network, 1), edge_by_id(&network, 2)];
+        let n1 = network
+            .node(network.edge_source(path[0]).unwrap())
+            .unwrap()
+            .coord;
+        let n3 = network
+            .node(network.edge_target(path[1]).unwrap())
+            .unwrap()
+            .coord;
+        let seg = SegmentInfo {
+            length_m: 200.0,
+            expected_m: 200.0,
+        };
+        let offsets = decoder.finalize_path(&mut path, n1, n3, seg, seg);
+        assert_eq!(ids(&network, &path), vec![1, 2], "LRP at N3: no extension");
         assert!(offsets.negative_offset_m.abs() < 1e-6);
     }
 

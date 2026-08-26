@@ -224,8 +224,11 @@ follows the forced continuation to the first junction (`RoadNetwork::is_valid_no
 `forced_continuation`, `forced_predecessor` in `graph.rs`; `finalize_path` in
 `decoder.rs`). The added length is folded into `positive_offset`/`negative_offset`,
 so the offset-trimmed geometry is unchanged — only the edge set grows. Extension is
-capped at `min(max_snap_extension_m, max_snap_extension_fraction × DNP)` and must
-keep the segment within the length tolerance. Because the offset then spans more
+capped at `min(max_snap_extension_m, max_snap_extension_fraction × DNP)`, must keep
+the segment within the length tolerance, and is only applied when the LRP coordinate is
+closer to the new terminal node than to the current one — this guards against HERE
+having a junction our OSM car graph lacks (measured on the KC corpus: the guard removed
+all ~100 such overshoots while keeping every extension that landed on HERE's endpoint). Because the offset then spans more
 than one edge, `*_offset_fraction` (relative to the first/last edge) can exceed 1.0;
 the meter offsets are authoritative.
 
