@@ -59,6 +59,10 @@ impl Default for CandidateConfig {
 /// `direction` selects which side of the projection point the edge bearing is measured on:
 /// `Forward` for first/intermediate LRPs (attributes describe the outgoing line),
 /// `Backward` for the last LRP (attributes describe the incoming line).
+// The parameters are the LRP's attributes plus lookup context; callers pass them
+// straight from the decoded LRP. Bundling into a struct is possible but adds
+// ceremony at every call site for no clarity gain.
+#[allow(clippy::too_many_arguments)]
 pub fn find_candidates(
     coord: Point<f64>,
     bearing: f64,
