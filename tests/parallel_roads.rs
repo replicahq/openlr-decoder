@@ -16,6 +16,7 @@
 //! when that matches the expected DNP (distance to next point).
 
 use geo::{GeodesicBearing, LineString, Point};
+use openlr_decoder::spatial::BearingDirection;
 use openlr_decoder::{
     find_candidates, Candidate, DecoderConfig, Edge, Fow, Frc, RoadNetwork, SpatialIndex,
 };
@@ -205,6 +206,11 @@ impl<'a> TestDecoder<'a> {
                 bearing,
                 Frc::Frc5, // All edges in test are FRC5
                 Fow::MultipleCarriageway,
+                if i == lrps.len() - 1 {
+                    BearingDirection::Backward
+                } else {
+                    BearingDirection::Forward
+                },
                 self.network,
                 self.spatial,
                 &self.config.candidate_config,
