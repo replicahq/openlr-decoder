@@ -136,18 +136,20 @@ The app shows:
 - Background network edges (hover to see edge IDs)
 - Success/failure status with error messages
 
-### Screenshots without a browser
+### Screenshots of the real UI
 
-The web app exposes `GET|POST /api/screenshot.png`, a matplotlib render of the same
-data the UI shows (background edges, LRPs + bearings, decoded edges, offset-trimmed
-geometry, optional HERE reference WKT). `compare_config` renders before/after panels;
-`focus_lrp` + `span_m` zoom on an endpoint. `qa/screenshot.py` wraps it:
+The web app exposes `GET|POST /api/screenshot.png`: it opens its own page in headless
+Chromium (Playwright) with `?code=…&config=<json>`, waits for the decode to render, and
+returns a PNG — exactly what a user sees. `focus_lrp` + `span_m` zoom on an endpoint,
+`map_only=true` crops out the sidebar, `scale=2` gives retina output. The same URL
+parameters work in a normal browser for shareable links. `qa/screenshot.py` wraps it
+and stitches before/after configs side by side:
 
 ```bash
 # server running with the network loaded (see above), then:
 ~/openlr-web/.venv/bin/python qa/screenshot.py CODE --out qa/screenshots/<topic> \
   --before '{"snap_to_valid_nodes": false}' --after '{"snap_to_valid_nodes": true}' \
-  --titles "before|after" --zoom-lrps 0 1
+  --zoom-lrps 0 1 --span-m 50
 ```
 
 Use this to attach visual evidence to PRs and to inspect benchmark regressions.
