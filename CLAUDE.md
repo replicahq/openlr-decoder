@@ -192,8 +192,24 @@ config = DecoderConfig(
     max_candidates=10,        # More candidates = more path options
     length_tolerance=0.35,    # 35% relative tolerance
     frc_tolerance=2,          # Allow ±2 FRC class difference
+    snap_to_valid_nodes=True, # Extend path ends to junctions (OpenLR Rule 4)
+    max_snap_extension_m=25.0,
 )
 ```
+
+### Terminal-node snap (OpenLR Rule 4)
+
+Encoders place LRPs on *valid* nodes (junctions); a node with one way in and one
+way out is invalid because a route search can step over it. After path selection
+the decoder checks whether the path starts/ends on an invalid node and, if so,
+follows the forced continuation to the first junction (`RoadNetwork::is_valid_node`,
+`forced_continuation`, `forced_predecessor` in `graph.rs`; `finalize_path` in
+`decoder.rs`). The added length is folded into `positive_offset`/`negative_offset`,
+so the offset-trimmed geometry is unchanged — only the edge set grows. Extension is
+capped at `min(max_snap_extension_m, max_snap_extension_fraction × DNP)` and must
+keep the segment within the length tolerance. Because the offset then spans more
+than one edge, `*_offset_fraction` (relative to the first/last edge) can exceed 1.0;
+the meter offsets are authoritative.
 
 ## Building & Testing
 
@@ -223,11 +239,14 @@ The `qa/` directory contains tooling for measuring decode quality across a 48K-c
 
 ```bash
 # 1. Build the version you want to test and install into the openlr-web venv
-maturin build --release -i python3.12
-cd ~/openlr-web && uv pip install --reinstall ~/openlr-decoder/target/wheels/openlr_decoder-*-cp312-*.whl
+# (match the venv's interpreter: `~/openlr-web/.venv/bin/python --version`)
+uvx maturin build --release -i python3.11
+cd ~/openlr-web && uv pip install --reinstall ~/openlr-decoder/target/wheels/openlr_decoder-*-cp311-*.whl
 
 # 2. Run benchmark (saves results keyed by commit hash)
+#    --config accepts DecoderConfig overrides (ints, floats, true/false)
 ~/openlr-web/.venv/bin/python qa/benchmark.py \
+  --network ~/openlr-web/openlr_test_edges.parquet \
   --save qa/results/$(git rev-parse --short HEAD).parquet
 
 # 3. Compare two runs
@@ -244,7 +263,14 @@ cd ~/openlr-web && uv pip install --reinstall ~/openlr-decoder/target/wheels/ope
 
 ### Test corpus
 
-`qa/test_codes.csv` contains ~48K OpenLR codes with HERE reference geometries (from `bqutils.geo.openlr_to_geography`), randomly sampled from `model-159019.michelin.arity_link_matches_usa_v2` within the KC bounding box (38.53–39.11°N, 95.15–94.47°W). Network: `openlr_test_edges.parquet` (458K edges).
+`qa/test_codes.csv` contains ~48K OpenLR codes with HERE reference geometries (from `bqutils.geo.openlr_to_geography`), randomly sampled from `model-159019.michelin.arity_link_matches_usa_v2` within the KC bounding box (38.53–39.11°N, 95.15–94.47°W). Network: `~/openlr-web/openlr_test_edges.parquet` (458K edges). NOTE: that file
+still has the pre-#25 `startVertex`/`endVertex` columns; the loader now requires
+`startOsmNode`/`endOsmNode`. Until it is regenerated, make a renamed copy
+(pyarrow `rename_columns`) to run the benchmark — barrier-node splits then remain,
+but A/B comparisons between decoder versions are still valid.
+
+The benchmark reconstructs geometry from the meter offsets (`positive_offset`,
+`negative_offset`) expressed as fractions of the whole edge path.
 
 ## Parquet Schema (Network Input)
 

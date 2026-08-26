@@ -220,9 +220,12 @@ pub struct DecodedPath {
     pub positive_offset_m: f64,
     /// Distance from last LRP projection to end of last edge (trim from end) in meters
     pub negative_offset_m: f64,
-    /// Fraction along first edge where first LRP projects (0.0-1.0)
+    /// `positive_offset_m` as a fraction of the first edge's length. Normally 0.0-1.0;
+    /// may exceed 1.0 when a terminal-node snap prepended edges (the offset then
+    /// spans more than the first edge — use `positive_offset_m` as authoritative).
     pub positive_offset_fraction: f64,
-    /// Fraction along last edge where last LRP projects (0.0-1.0, measured from end)
+    /// `negative_offset_m` as a fraction of the last edge's length, measured from its
+    /// end. Normally 0.0-1.0; may exceed 1.0 when a terminal-node snap appended edges.
     pub negative_offset_fraction: f64,
     /// The edge ID that covers the most distance in the decoded path
     pub primary_edge_id: u64,
@@ -245,6 +248,24 @@ struct PathResult {
     total_length: f64,
 }
 
+/// Length bookkeeping for one LRP-to-LRP segment, used to bound terminal snaps.
+#[derive(Debug, Clone, Copy, Default)]
+struct SegmentInfo {
+    /// Decoded path length of the segment (meters)
+    length_m: f64,
+    /// Encoded DNP for the segment (meters)
+    expected_m: f64,
+}
+
+/// Offsets computed for a finalized path.
+#[derive(Debug, Clone, Copy, Default)]
+struct PathOffsets {
+    positive_offset_m: f64,
+    negative_offset_m: f64,
+    positive_offset_fraction: f64,
+    negative_offset_fraction: f64,
+}
+
 /// Configuration for the decoder
 #[derive(Debug, Clone)]
 pub struct DecoderConfig {
@@ -263,6 +284,18 @@ pub struct DecoderConfig {
     /// service, track) in A* search. This makes the decoder prefer tertiary/unclassified
     /// roads over residential when paths are similar in length. Default 10m.
     pub access_road_cost_penalty: f64,
+    /// Extend decoded paths so their start and end lie on *valid* nodes (junctions),
+    /// per OpenLR whitepaper Rule 4. When the selected path terminates on a node
+    /// with no routing choice (1-in/1-out), the forced continuation is followed to
+    /// the first junction and the added length is absorbed into the offsets, so
+    /// the LRP-to-LRP geometry is unchanged. Default true.
+    pub snap_to_valid_nodes: bool,
+    /// Absolute cap (meters) on how far a terminal-node snap may extend a path
+    /// at each end. Default 25m.
+    pub max_snap_extension_m: f64,
+    /// Cap on terminal-node snap length as a fraction of the adjacent segment's DNP.
+    /// The effective cap is `min(max_snap_extension_m, fraction * dnp)`. Default 0.10.
+    pub max_snap_extension_fraction: f64,
 }
 
 impl Default for DecoderConfig {
@@ -274,6 +307,9 @@ impl Default for DecoderConfig {
             max_search_distance_factor: 2.0, // Search up to 2x the expected distance
             slip_road_cost_penalty: 20.0, // 20m penalty gently prefers main roads over slip roads
             access_road_cost_penalty: 10.0, // 10m penalty gently prefers tertiary over residential
+            snap_to_valid_nodes: true,
+            max_snap_extension_m: 25.0,
+            max_snap_extension_fraction: 0.10,
         }
     }
 }
@@ -297,6 +333,159 @@ impl<'a> Decoder<'a> {
     pub fn with_config(mut self, config: DecoderConfig) -> Self {
         self.config = config;
         self
+    }
+
+    /// Upper bound on acceptable decoded length for a segment with the given DNP:
+    /// whichever of the relative and absolute tolerances is more generous.
+    fn max_valid_distance(&self, expected_distance: f64) -> f64 {
+        let rel_max = expected_distance * (1.0 + self.config.length_tolerance);
+        let abs_max = expected_distance + self.config.absolute_length_tolerance;
+        rel_max.max(abs_max)
+    }
+
+    /// Maximum length a terminal-node snap may add to one end of the path, given
+    /// the adjacent segment. Returns 0 when snapping is disabled or the segment has
+    /// no room left under `max_valid_distance`.
+    fn snap_cap_m(&self, seg: SegmentInfo) -> f64 {
+        if !self.config.snap_to_valid_nodes {
+            return 0.0;
+        }
+        let cap = self
+            .config
+            .max_snap_extension_m
+            .min(self.config.max_snap_extension_fraction * seg.expected_m);
+        let headroom = self.max_valid_distance(seg.expected_m) - seg.length_m;
+        cap.min(headroom).max(0.0)
+    }
+
+    /// Walk forward from the end of `path` along forced continuations (OpenLR Rule 4:
+    /// nodes with no routing choice) until a valid node is reached. Returns the edges
+    /// to append and their total length, or `None` if no valid node is reachable
+    /// within `cap_m` (a partial extension would still end on an invalid node, so
+    /// it is not worth applying).
+    fn forward_extension(&self, path: &[EdgeIndex], cap_m: f64) -> Option<(Vec<EdgeIndex>, f64)> {
+        let mut incoming = *path.last()?;
+        let mut node = self.network.edge_target(incoming)?;
+        let mut added = Vec::new();
+        let mut added_m = 0.0;
+        while let Some(next) = self.network.forced_continuation(node, incoming) {
+            // Don't loop back onto edges we already traverse.
+            if path.contains(&next) || added.contains(&next) {
+                return None;
+            }
+            let len = self.network.edge(next)?.length_m;
+            if added_m + len > cap_m {
+                return None;
+            }
+            added_m += len;
+            added.push(next);
+            incoming = next;
+            node = self.network.edge_target(next)?;
+        }
+        if added.is_empty() {
+            None
+        } else {
+            Some((added, added_m))
+        }
+    }
+
+    /// Mirror of `forward_extension`: walk backward from the start of `path` along
+    /// forced predecessors to the nearest valid node. Returned edges are in path
+    /// order (ready to be prepended).
+    fn backward_extension(&self, path: &[EdgeIndex], cap_m: f64) -> Option<(Vec<EdgeIndex>, f64)> {
+        let mut outgoing = *path.first()?;
+        let mut node = self.network.edge_source(outgoing)?;
+        let mut added = Vec::new();
+        let mut added_m = 0.0;
+        while let Some(prev) = self.network.forced_predecessor(node, outgoing) {
+            if path.contains(&prev) || added.contains(&prev) {
+                return None;
+            }
+            let len = self.network.edge(prev)?.length_m;
+            if added_m + len > cap_m {
+                return None;
+            }
+            added_m += len;
+            added.push(prev);
+            outgoing = prev;
+            node = self.network.edge_source(prev)?;
+        }
+        if added.is_empty() {
+            None
+        } else {
+            added.reverse();
+            Some((added, added_m))
+        }
+    }
+
+    /// Compute LRP-projection offsets for `path`, then snap its ends to valid nodes.
+    ///
+    /// Spec deviation: OpenLR Section 12.10 says offsets come from the binary-encoded
+    /// fractions, but HERE data always encodes them as 0. Instead we project the LRP
+    /// coordinates onto the first/last edges in our network, giving edge-relative
+    /// offsets that are meaningful for consumers working with OSM edges.
+    ///
+    /// If `snap_to_valid_nodes` is enabled and a terminal edge ends on an invalid
+    /// node (Rule 4), the path is extended along the forced continuation to the first
+    /// junction and the added length is folded into the corresponding offset, so the
+    /// offset-trimmed geometry is unchanged while the edge set covers the whole link.
+    fn finalize_path(
+        &self,
+        path: &mut Vec<EdgeIndex>,
+        first_lrp_coord: Point<f64>,
+        last_lrp_coord: Point<f64>,
+        first_segment: SegmentInfo,
+        last_segment: SegmentInfo,
+    ) -> PathOffsets {
+        let (Some(&first_edge_idx), Some(&last_edge_idx)) = (path.first(), path.last()) else {
+            return PathOffsets::default();
+        };
+
+        let mut positive_offset_m = self
+            .network
+            .edge(first_edge_idx)
+            .map(|e| {
+                e.length_m
+                    * crate::spatial::project_point_to_line_fraction(first_lrp_coord, &e.geometry)
+            })
+            .unwrap_or(0.0);
+        let mut negative_offset_m = self
+            .network
+            .edge(last_edge_idx)
+            .map(|e| {
+                e.length_m
+                    * (1.0
+                        - crate::spatial::project_point_to_line_fraction(
+                            last_lrp_coord,
+                            &e.geometry,
+                        ))
+            })
+            .unwrap_or(0.0);
+
+        if let Some((tail, added_m)) = self.forward_extension(path, self.snap_cap_m(last_segment)) {
+            path.extend(tail);
+            negative_offset_m += added_m;
+        }
+        if let Some((head, added_m)) = self.backward_extension(path, self.snap_cap_m(first_segment))
+        {
+            path.splice(0..0, head);
+            positive_offset_m += added_m;
+        }
+
+        let frac = |offset_m: f64, edge_idx: Option<&EdgeIndex>| {
+            edge_idx
+                .and_then(|&idx| self.network.edge(idx))
+                .filter(|e| e.length_m > 0.0)
+                .map(|e| offset_m / e.length_m)
+                .unwrap_or(0.0)
+        };
+
+        PathOffsets {
+            positive_offset_m,
+            negative_offset_m,
+            positive_offset_fraction: frac(positive_offset_m, path.first()),
+            negative_offset_fraction: frac(negative_offset_m, path.last()),
+        }
     }
 
     /// Convert edge indices to stable edge IDs
@@ -400,6 +589,10 @@ impl<'a> Decoder<'a> {
         let mut total_length = 0.0;
         // Track coverage per edge (edge may appear multiple times, so we aggregate)
         let mut edge_coverage_map: HashMap<EdgeIndex, f64> = HashMap::new();
+        // (path length, expected DNP) of the first and last LRP segments, used to
+        // bound the terminal-node snap.
+        let mut first_segment = SegmentInfo::default();
+        let mut last_segment = SegmentInfo::default();
 
         for i in 0..points.len() - 1 {
             // Get distance to next point (path attributes are optional for last point)
@@ -425,6 +618,14 @@ impl<'a> Decoder<'a> {
 
             // Add the actual traversed length (accounts for partial edge traversals)
             total_length += path_result.total_length;
+            let seg = SegmentInfo {
+                length_m: path_result.total_length,
+                expected_m: expected_distance,
+            };
+            if i == 0 {
+                first_segment = seg;
+            }
+            last_segment = seg;
 
             // Accumulate edge coverages (aggregate if edge appears multiple times)
             for coverage in &path_result.coverages {
@@ -456,59 +657,26 @@ impl<'a> Decoder<'a> {
             .map(|e| e.id)
             .unwrap_or(0);
 
-        // Spec deviation: OpenLR Section 12.10 says offsets come from the binary-encoded
-        // fractions, but HERE data always encodes them as 0. Instead we project the LRP
-        // coordinates onto the first/last edges in our network, giving edge-relative offsets
-        // that are meaningful for consumers working with OSM edges.
-        let (
-            positive_offset_m,
-            negative_offset_m,
-            positive_offset_fraction,
-            negative_offset_fraction,
-        ) = if !full_path.is_empty() {
-            let first_lrp_coord = Point::new(points[0].coordinate.lon, points[0].coordinate.lat);
-            let last_lrp_coord = Point::new(
-                points[points.len() - 1].coordinate.lon,
-                points[points.len() - 1].coordinate.lat,
-            );
-
-            let first_edge_idx = full_path[0];
-            let last_edge_idx = full_path[full_path.len() - 1];
-
-            let (pos_offset_m, pos_frac) =
-                if let Some(first_edge) = self.network.edge(first_edge_idx) {
-                    let frac = crate::spatial::project_point_to_line_fraction(
-                        first_lrp_coord,
-                        &first_edge.geometry,
-                    );
-                    (first_edge.length_m * frac, frac)
-                } else {
-                    (0.0, 0.0)
-                };
-
-            let (neg_offset_m, neg_frac) = if let Some(last_edge) = self.network.edge(last_edge_idx)
-            {
-                let frac = crate::spatial::project_point_to_line_fraction(
-                    last_lrp_coord,
-                    &last_edge.geometry,
-                );
-                (last_edge.length_m * (1.0 - frac), 1.0 - frac)
-            } else {
-                (0.0, 0.0)
-            };
-
-            (pos_offset_m, neg_offset_m, pos_frac, neg_frac)
-        } else {
-            (0.0, 0.0, 0.0, 0.0)
-        };
+        let first_lrp_coord = Point::new(points[0].coordinate.lon, points[0].coordinate.lat);
+        let last_lrp_coord = Point::new(
+            points[points.len() - 1].coordinate.lon,
+            points[points.len() - 1].coordinate.lat,
+        );
+        let offsets = self.finalize_path(
+            &mut full_path,
+            first_lrp_coord,
+            last_lrp_coord,
+            first_segment,
+            last_segment,
+        );
 
         Ok(DecodedPath {
             edge_ids: self.edge_indices_to_ids(&full_path),
             length_m: total_length,
-            positive_offset_m,
-            negative_offset_m,
-            positive_offset_fraction,
-            negative_offset_fraction,
+            positive_offset_m: offsets.positive_offset_m,
+            negative_offset_m: offsets.negative_offset_m,
+            positive_offset_fraction: offsets.positive_offset_fraction,
+            negative_offset_fraction: offsets.negative_offset_fraction,
             primary_edge_id,
             primary_edge_coverage_m: primary_coverage,
         })
@@ -610,53 +778,22 @@ impl<'a> Decoder<'a> {
             .map(|e| e.id)
             .unwrap_or(0);
 
-        // Spec deviation: same as decode_line — projection-based offsets instead of binary.
-        let (
-            positive_offset_m,
-            negative_offset_m,
-            positive_offset_fraction,
-            negative_offset_fraction,
-        ) = if !path_result.edges.is_empty() {
-            let first_lrp_coord = Point::new(points[0].coordinate.lon, points[0].coordinate.lat);
-            let last_lrp_coord = Point::new(points[1].coordinate.lon, points[1].coordinate.lat);
-
-            let first_edge_idx = path_result.edges[0];
-            let last_edge_idx = path_result.edges[path_result.edges.len() - 1];
-
-            let (pos_offset_m, pos_frac) =
-                if let Some(first_edge) = self.network.edge(first_edge_idx) {
-                    let frac = crate::spatial::project_point_to_line_fraction(
-                        first_lrp_coord,
-                        &first_edge.geometry,
-                    );
-                    (first_edge.length_m * frac, frac)
-                } else {
-                    (0.0, 0.0)
-                };
-
-            let (neg_offset_m, neg_frac) = if let Some(last_edge) = self.network.edge(last_edge_idx)
-            {
-                let frac = crate::spatial::project_point_to_line_fraction(
-                    last_lrp_coord,
-                    &last_edge.geometry,
-                );
-                (last_edge.length_m * (1.0 - frac), 1.0 - frac)
-            } else {
-                (0.0, 0.0)
-            };
-
-            (pos_offset_m, neg_offset_m, pos_frac, neg_frac)
-        } else {
-            (0.0, 0.0, 0.0, 0.0)
+        let mut full_path = path_result.edges.clone();
+        let first_lrp_coord = Point::new(points[0].coordinate.lon, points[0].coordinate.lat);
+        let last_lrp_coord = Point::new(points[1].coordinate.lon, points[1].coordinate.lat);
+        let seg = SegmentInfo {
+            length_m: path_result.total_length,
+            expected_m: expected_distance,
         };
+        let offsets = self.finalize_path(&mut full_path, first_lrp_coord, last_lrp_coord, seg, seg);
 
         Ok(DecodedPath {
-            edge_ids: self.edge_indices_to_ids(&path_result.edges),
+            edge_ids: self.edge_indices_to_ids(&full_path),
             length_m: path_result.total_length,
-            positive_offset_m,
-            negative_offset_m,
-            positive_offset_fraction,
-            negative_offset_fraction,
+            positive_offset_m: offsets.positive_offset_m,
+            negative_offset_m: offsets.negative_offset_m,
+            positive_offset_fraction: offsets.positive_offset_fraction,
+            negative_offset_fraction: offsets.negative_offset_fraction,
             primary_edge_id,
             primary_edge_coverage_m: primary_coverage,
         })
@@ -784,8 +921,8 @@ impl<'a> Decoder<'a> {
         // For maximum: use whichever is MORE GENEROUS
         // For short segments, absolute tolerance provides necessary slack for cross-provider
         // geometry differences; for long segments, relative tolerance is more appropriate
-        let abs_max = expected_distance + self.config.absolute_length_tolerance;
-        let max_valid_distance = rel_max.max(abs_max);
+        let max_valid_distance = self.max_valid_distance(expected_distance);
+        debug_assert!(max_valid_distance >= rel_max);
 
         // Maximum distance for A* search - don't explore beyond this
         // Use max_search_distance_factor to bound the search, with a minimum of 500m
@@ -1839,5 +1976,221 @@ mod tests {
         assert_eq!(path.edges.len(), 1);
         assert_eq!(path.edges[0], edge_idx);
         assert!((path.total_length - 4.0).abs() < 0.1);
+    }
+
+    /// Network for terminal-snap tests (all edges one-way, west→east):
+    ///
+    /// ```text
+    /// N1 --e1(100m)--> N2 --e2(100m)--> N3 --e3(15m)--> N4 --e4(100m)--> N5
+    ///                  ^                                 |
+    ///                  |                                 v
+    ///                  N6 --e6(20m)                     N7 (e7, 100m)
+    /// ```
+    ///
+    /// N3 is 1-in/1-out (invalid); N2 and N4 are junctions (valid).
+    fn snap_network() -> (RoadNetwork, SpatialIndex) {
+        TestNetworkBuilder::new()
+            .add_node(1, 0.0, 0.0)
+            .add_node(2, 0.0, 0.001)
+            .add_node(3, 0.0, 0.002)
+            .add_node(4, 0.0, 0.0021)
+            .add_node(5, 0.0, 0.003)
+            .add_node(6, -0.0002, 0.001)
+            .add_node(7, -0.001, 0.0021)
+            .add_edge(1, 1, 2, 100.0, Frc::Frc4, Fow::SingleCarriageway)
+            .add_edge(2, 2, 3, 100.0, Frc::Frc4, Fow::SingleCarriageway)
+            .add_edge(3, 3, 4, 15.0, Frc::Frc4, Fow::SingleCarriageway)
+            .add_edge(4, 4, 5, 100.0, Frc::Frc4, Fow::SingleCarriageway)
+            .add_edge(6, 6, 2, 20.0, Frc::Frc4, Fow::SingleCarriageway)
+            .add_edge(7, 4, 7, 100.0, Frc::Frc4, Fow::SingleCarriageway)
+            .build()
+    }
+
+    fn edge_by_id(network: &RoadNetwork, id: u64) -> EdgeIndex {
+        *network.edge_id_to_index.as_ref().unwrap().get(&id).unwrap()
+    }
+
+    fn ids(network: &RoadNetwork, path: &[EdgeIndex]) -> Vec<u64> {
+        path.iter().map(|&i| network.edge(i).unwrap().id).collect()
+    }
+
+    #[test]
+    fn test_snap_extends_end_to_valid_node_and_folds_into_offset() {
+        let (network, spatial) = snap_network();
+        let decoder = Decoder::new(&network, &spatial);
+
+        // Path e1,e2 ends at N3 (invalid). Last LRP sits at the end of e2.
+        let mut path = vec![edge_by_id(&network, 1), edge_by_id(&network, 2)];
+        let n1 = network
+            .node(network.edge_source(path[0]).unwrap())
+            .unwrap()
+            .coord;
+        let n3 = network
+            .node(network.edge_target(path[1]).unwrap())
+            .unwrap()
+            .coord;
+        let seg = SegmentInfo {
+            length_m: 200.0,
+            expected_m: 200.0,
+        };
+
+        let offsets = decoder.finalize_path(&mut path, n1, n3, seg, seg);
+
+        assert_eq!(
+            ids(&network, &path),
+            vec![1, 2, 3],
+            "e3 (15m) appended to reach N4"
+        );
+        assert!((offsets.negative_offset_m - 15.0).abs() < 1e-6);
+        assert!((offsets.negative_offset_fraction - 1.0).abs() < 1e-6);
+        // Start (N1, a source node) is valid — untouched.
+        assert!(offsets.positive_offset_m.abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_snap_respects_absolute_cap() {
+        let (network, spatial) = snap_network();
+        let config = DecoderConfig {
+            max_snap_extension_m: 10.0, // e3 is 15m
+            ..DecoderConfig::default()
+        };
+        let decoder = Decoder::new(&network, &spatial).with_config(config);
+
+        let mut path = vec![edge_by_id(&network, 1), edge_by_id(&network, 2)];
+        let n1 = network
+            .node(network.edge_source(path[0]).unwrap())
+            .unwrap()
+            .coord;
+        let n3 = network
+            .node(network.edge_target(path[1]).unwrap())
+            .unwrap()
+            .coord;
+        let seg = SegmentInfo {
+            length_m: 200.0,
+            expected_m: 200.0,
+        };
+
+        let offsets = decoder.finalize_path(&mut path, n1, n3, seg, seg);
+        assert_eq!(ids(&network, &path), vec![1, 2]);
+        assert!(offsets.negative_offset_m.abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_snap_respects_dnp_fraction_and_length_headroom() {
+        let (network, spatial) = snap_network();
+        let decoder = Decoder::new(&network, &spatial);
+        let mut path = vec![edge_by_id(&network, 1), edge_by_id(&network, 2)];
+        let n1 = network
+            .node(network.edge_source(path[0]).unwrap())
+            .unwrap()
+            .coord;
+        let n3 = network
+            .node(network.edge_target(path[1]).unwrap())
+            .unwrap()
+            .coord;
+
+        // 10% of a 100m DNP = 10m < 15m → no snap
+        let short_dnp = SegmentInfo {
+            length_m: 200.0,
+            expected_m: 100.0,
+        };
+        decoder.finalize_path(&mut path, n1, n3, short_dnp, short_dnp);
+        assert_eq!(ids(&network, &path), vec![1, 2]);
+
+        // Segment already at max_valid_distance (DNP 200 → max 300) → no headroom
+        let no_headroom = SegmentInfo {
+            length_m: 295.0,
+            expected_m: 200.0,
+        };
+        decoder.finalize_path(&mut path, n1, n3, no_headroom, no_headroom);
+        assert_eq!(ids(&network, &path), vec![1, 2]);
+    }
+
+    #[test]
+    fn test_snap_disabled_by_config() {
+        let (network, spatial) = snap_network();
+        let config = DecoderConfig {
+            snap_to_valid_nodes: false,
+            ..DecoderConfig::default()
+        };
+        let decoder = Decoder::new(&network, &spatial).with_config(config);
+        let mut path = vec![edge_by_id(&network, 1), edge_by_id(&network, 2)];
+        let n1 = network
+            .node(network.edge_source(path[0]).unwrap())
+            .unwrap()
+            .coord;
+        let n3 = network
+            .node(network.edge_target(path[1]).unwrap())
+            .unwrap()
+            .coord;
+        let seg = SegmentInfo {
+            length_m: 200.0,
+            expected_m: 200.0,
+        };
+        decoder.finalize_path(&mut path, n1, n3, seg, seg);
+        assert_eq!(ids(&network, &path), vec![1, 2]);
+    }
+
+    #[test]
+    fn test_snap_extends_start_to_valid_node() {
+        let (network, spatial) = snap_network();
+        let decoder = Decoder::new(&network, &spatial);
+
+        // Path e4 starts at N4 (valid). Path e3,e4? e3 starts at N3 (invalid) and
+        // its forced predecessor is e2 (100m) — too long for the cap. Use a small
+        // cap-friendly case instead: path starting at N3 with a big DNP.
+        let mut path = vec![edge_by_id(&network, 3), edge_by_id(&network, 4)];
+        let n3 = network
+            .node(network.edge_source(path[0]).unwrap())
+            .unwrap()
+            .coord;
+        let n5 = network
+            .node(network.edge_target(path[1]).unwrap())
+            .unwrap()
+            .coord;
+        let config = DecoderConfig {
+            max_snap_extension_m: 150.0,
+            ..DecoderConfig::default()
+        };
+        let decoder = decoder.with_config(config);
+        let seg = SegmentInfo {
+            length_m: 115.0,
+            expected_m: 1500.0, // 10% = 150m ≥ 100m
+        };
+
+        let offsets = decoder.finalize_path(&mut path, n3, n5, seg, seg);
+        assert_eq!(
+            ids(&network, &path),
+            vec![2, 3, 4],
+            "e2 prepended to reach junction N2"
+        );
+        assert!((offsets.positive_offset_m - 100.0).abs() < 1e-6);
+        assert!((offsets.positive_offset_fraction - 1.0).abs() < 1e-6);
+        // End N5 is a sink (valid) — untouched.
+        assert!(offsets.negative_offset_m.abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_snap_noop_when_terminal_nodes_already_valid() {
+        let (network, spatial) = snap_network();
+        let decoder = Decoder::new(&network, &spatial);
+        // e1 runs N1 (source) → N2 (junction): both valid.
+        let mut path = vec![edge_by_id(&network, 1)];
+        let n1 = network
+            .node(network.edge_source(path[0]).unwrap())
+            .unwrap()
+            .coord;
+        let n2 = network
+            .node(network.edge_target(path[0]).unwrap())
+            .unwrap()
+            .coord;
+        let seg = SegmentInfo {
+            length_m: 100.0,
+            expected_m: 100.0,
+        };
+        let offsets = decoder.finalize_path(&mut path, n1, n2, seg, seg);
+        assert_eq!(ids(&network, &path), vec![1]);
+        assert!(offsets.positive_offset_m.abs() < 1e-6);
+        assert!(offsets.negative_offset_m.abs() < 1e-6);
     }
 }

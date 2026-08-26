@@ -331,6 +331,112 @@ impl RoadNetwork {
         self.graph.edge_endpoints(edge_idx).map(|(s, _)| s)
     }
 
+    /// Check whether a node is a *valid* node per OpenLR whitepaper Rule 4 (§6).
+    ///
+    /// A node is **invalid** when a route search can step over it without making
+    /// a choice: it connects exactly two distinct neighbours, with at most one
+    /// incoming and one outgoing edge per neighbour and equal in/out degree
+    /// (i.e. 1-in/1-out, or 2-in/2-out on a bidirectional through-road).
+    /// Everything else — junctions, dead ends, one-way merges/splits — is valid.
+    ///
+    /// Encoders place LRPs on valid nodes, so a decoded path terminating on an
+    /// invalid node has most likely stopped short of the intended endpoint.
+    pub fn is_valid_node(&self, node_idx: NodeIndex) -> bool {
+        use petgraph::Direction;
+
+        let mut in_deg = 0usize;
+        let mut out_deg = 0usize;
+        // (neighbour, incoming count, outgoing count) — at most 2 tracked before bailing
+        let mut neighbours: Vec<(NodeIndex, usize, usize)> = Vec::with_capacity(3);
+
+        let mut record = |other: NodeIndex, incoming: bool| -> bool {
+            if other == node_idx {
+                return false; // self-loop: not a through-node
+            }
+            match neighbours.iter_mut().find(|(n, _, _)| *n == other) {
+                Some(entry) => {
+                    if incoming {
+                        entry.1 += 1;
+                    } else {
+                        entry.2 += 1;
+                    }
+                }
+                None => {
+                    if neighbours.len() >= 2 {
+                        return false; // 3+ distinct neighbours: junction
+                    }
+                    neighbours.push(if incoming {
+                        (other, 1, 0)
+                    } else {
+                        (other, 0, 1)
+                    });
+                }
+            }
+            true
+        };
+
+        for e in self.graph.edges_directed(node_idx, Direction::Incoming) {
+            in_deg += 1;
+            if !record(e.source(), true) {
+                return true;
+            }
+        }
+        for e in self.graph.edges_directed(node_idx, Direction::Outgoing) {
+            out_deg += 1;
+            if !record(e.target(), false) {
+                return true;
+            }
+        }
+
+        if neighbours.len() != 2 || in_deg != out_deg {
+            return true;
+        }
+        // Each neighbour may contribute at most one edge in each direction;
+        // parallel edges to the same neighbour imply a real choice.
+        if neighbours.iter().any(|(_, i, o)| *i > 1 || *o > 1) {
+            return true;
+        }
+        false
+    }
+
+    /// If `node_idx` is an invalid node (see [`is_valid_node`](Self::is_valid_node)),
+    /// return the single outgoing edge that continues travel after arriving via
+    /// `incoming` — i.e. the only exit that is not a U-turn. Returns `None` at a
+    /// valid node, or if `incoming` does not actually end at `node_idx`.
+    pub fn forced_continuation(
+        &self,
+        node_idx: NodeIndex,
+        incoming: EdgeIndex,
+    ) -> Option<EdgeIndex> {
+        let (from, to) = self.graph.edge_endpoints(incoming)?;
+        if to != node_idx || self.is_valid_node(node_idx) {
+            return None;
+        }
+        self.graph
+            .edges(node_idx)
+            .find(|e| e.target() != from)
+            .map(|e| e.id())
+    }
+
+    /// Mirror of [`forced_continuation`](Self::forced_continuation) for walking
+    /// backwards: if `node_idx` is invalid, return the single incoming edge a
+    /// traveller must have arrived on before leaving via `outgoing`.
+    pub fn forced_predecessor(
+        &self,
+        node_idx: NodeIndex,
+        outgoing: EdgeIndex,
+    ) -> Option<EdgeIndex> {
+        use petgraph::Direction;
+        let (from, to) = self.graph.edge_endpoints(outgoing)?;
+        if from != node_idx || self.is_valid_node(node_idx) {
+            return None;
+        }
+        self.graph
+            .edges_directed(node_idx, Direction::Incoming)
+            .find(|e| e.source() != to)
+            .map(|e| e.id())
+    }
+
     pub fn node_count(&self) -> usize {
         self.graph.node_count()
     }
@@ -408,5 +514,92 @@ mod tests {
             Fow::SlipRoad.substitution_score(Fow::SingleCarriageway),
             0.0
         );
+    }
+
+    fn ls(a: (f64, f64), b: (f64, f64)) -> LineString<f64> {
+        LineString::from(vec![a, b])
+    }
+
+    /// Build a small network: A→X→B one-way through-road, plus a junction J
+    /// with three neighbours, and a dead end D hanging off B.
+    fn topo_network() -> (RoadNetwork, HashMap<&'static str, NodeIndex>) {
+        let mut net = RoadNetwork::new();
+        let pts: [(&str, i64, (f64, f64)); 6] = [
+            ("A", 1, (0.0, 0.0)),
+            ("X", 2, (0.001, 0.0)),
+            ("B", 3, (0.002, 0.0)),
+            ("J", 4, (0.003, 0.0)),
+            ("C", 5, (0.003, 0.001)),
+            ("D", 6, (0.002, -0.001)),
+        ];
+        let mut idx = HashMap::new();
+        for (name, id, (x, y)) in pts {
+            idx.insert(name, net.get_or_add_node(id, Point::new(x, y)));
+        }
+        let p = |n: &str| pts.iter().find(|q| q.0 == n).unwrap().2;
+        let mut eid = 0;
+        let mut add = |net: &mut RoadNetwork, a: &str, b: &str| {
+            eid += 1;
+            let (ia, ib) = (
+                pts.iter().find(|q| q.0 == a).unwrap().1,
+                pts.iter().find(|q| q.0 == b).unwrap().1,
+            );
+            net.add_edge(
+                ia,
+                ib,
+                Edge::new(eid, ls(p(a), p(b)), Frc::Frc4, Fow::SingleCarriageway),
+            )
+        };
+        add(&mut net, "A", "X"); // one-way A→X
+        add(&mut net, "X", "B"); // one-way X→B
+        add(&mut net, "B", "J");
+        add(&mut net, "J", "B");
+        add(&mut net, "J", "C");
+        add(&mut net, "C", "J");
+        add(&mut net, "B", "D"); // dead-end spur, two-way
+        add(&mut net, "D", "B");
+        (net, idx)
+    }
+
+    #[test]
+    fn test_is_valid_node_rule4() {
+        let (net, n) = topo_network();
+        // X: 1-in/1-out through-node → invalid
+        assert!(!net.is_valid_node(n["X"]));
+        // A: source only (0-in/1-out) → valid
+        assert!(net.is_valid_node(n["A"]));
+        // B: neighbours X, J, D → junction → valid
+        assert!(net.is_valid_node(n["B"]));
+        // J: neighbours B, C, bidirectional, 2-in/2-out → invalid (through-node)
+        assert!(!net.is_valid_node(n["J"]));
+        // C, D: dead ends (single neighbour) → valid
+        assert!(net.is_valid_node(n["C"]));
+        assert!(net.is_valid_node(n["D"]));
+    }
+
+    #[test]
+    fn test_forced_continuation_and_predecessor() {
+        let (net, n) = topo_network();
+        let edge_between = |a: NodeIndex, b: NodeIndex| net.graph.find_edge(a, b).unwrap();
+
+        let ax = edge_between(n["A"], n["X"]);
+        let xb = edge_between(n["X"], n["B"]);
+        let bj = edge_between(n["B"], n["J"]);
+        let jc = edge_between(n["J"], n["C"]);
+
+        // Arriving at X via A→X must continue on X→B
+        assert_eq!(net.forced_continuation(n["X"], ax), Some(xb));
+        // Arriving at J via B→J must continue to C (not U-turn back to B)
+        assert_eq!(net.forced_continuation(n["J"], bj), Some(jc));
+        // B is a valid node: no forced continuation
+        assert_eq!(net.forced_continuation(n["B"], xb), None);
+        // Mismatched incoming edge
+        assert_eq!(net.forced_continuation(n["X"], xb), None);
+
+        // Backwards: leaving X via X→B means we arrived via A→X
+        assert_eq!(net.forced_predecessor(n["X"], xb), Some(ax));
+        // Leaving J via J→C means we arrived via B→J
+        assert_eq!(net.forced_predecessor(n["J"], jc), Some(bj));
+        assert_eq!(net.forced_predecessor(n["B"], bj), None);
     }
 }

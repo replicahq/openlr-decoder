@@ -161,17 +161,14 @@ def run_benchmark(
     df = batch.to_pandas()
     cols = set(df.columns)
 
-    # Handle schema differences across versions
-    pos_off_col = (
-        "positive_offset_fraction"
-        if "positive_offset_fraction" in cols
-        else "positive_offset"
-    )
-    neg_off_col = (
-        "negative_offset_fraction"
-        if "negative_offset_fraction" in cols
-        else "negative_offset"
-    )
+    # Offsets: prefer meter values and express them as fractions of the *whole*
+    # edge path (length + both offsets), which is what reconstruct_path_geometry
+    # expects. The per-edge `*_offset_fraction` columns are relative to the first/
+    # last edge only and can exceed 1.0 when a terminal-node snap spans edges,
+    # so they cannot be applied to the full path directly.
+    has_meter_offsets = {"positive_offset", "negative_offset"} <= cols
+    pos_off_col = "positive_offset" if has_meter_offsets else "positive_offset_fraction"
+    neg_off_col = "negative_offset" if has_meter_offsets else "negative_offset_fraction"
     has_primary = "primary_edge_id" in cols
 
     def safe_float(val):
@@ -190,6 +187,13 @@ def run_benchmark(
 
         pos_frac = safe_float(row[pos_off_col]) or 0.0
         neg_frac = safe_float(row[neg_off_col]) or 0.0
+        if has_meter_offsets:
+            lrp_len = safe_float(row["length"]) or 0.0
+            total_m = lrp_len + pos_frac + neg_frac
+            if total_m > 0:
+                pos_frac, neg_frac = pos_frac / total_m, neg_frac / total_m
+            else:
+                pos_frac, neg_frac = 0.0, 0.0
 
         result = {
             "openlr_code": tc["openlr_code"],
@@ -426,7 +430,11 @@ def main():
         config_kwargs = {}
         for kv in args.config:
             k, v = kv.split("=", 1)
-            # Auto-cast numeric values
+            # Auto-cast boolean / numeric values
+            if v.lower() in ("true", "false"):
+                v = v.lower() == "true"
+                config_kwargs[k] = v
+                continue
             try:
                 v = int(v)
             except ValueError:
