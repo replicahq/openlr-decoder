@@ -119,6 +119,25 @@ Key design decisions driven by this:
 
 5. **Same-edge handling**: Short segments where both LRPs fall on the same OSM edge need special relaxed length checking.
 
+## Deviations from the OpenLR Whitepaper (v1.5)
+
+Verified against the 47,931-code KC corpus where noted.
+
+**Follows HERE, not the spec**
+- **Last-LRP bearing** is matched in the travel direction. The spec (§5.2.4, Table 74) points it *back* along the incoming line. HERE uses travel direction in 100% of corpus codes; spec-conformant encoders (e.g. TomTom) will fail the ±90° filter on the last LRP.
+- **Encoded offsets are ignored** (0 of 47,931 corpus codes have one). `positive_offset`/`negative_offset` on the result are the first/last LRP's projection distance onto the first/last edge — not the spec's offsets.
+
+**Not implemented**
+- **≥3 LRPs**: segments are solved pairwise; the intermediate LRP is not forced onto one shared edge (§12.1 Step 5). Untested — corpus is all 2-LRP.
+- **PointAlongLine** returns the path; offset, side-of-road and orientation are not applied.
+- **Bearing** uses the projection segment, not the 20 m BEARDIST chord (§5.2.4).
+- **FOW**: no `junction`/`oneway` columns, so `Roundabout` never occurs and `MultipleCarriageway` only via `lanes >= 4`.
+- GeoCoordinate, POI, area types and ClosedLine are unsupported.
+
+**Easy to misread**
+- `max_candidate_distance_m` gates the decode on *one* LRP having a close candidate; others may match up to `search_radius_m`.
+- Start/end edges under 3% of the path are dropped from `edge_ids` but still counted in `length`.
+
 ## Testing & Debugging Bad Matches
 
 ### Visualization Web App
