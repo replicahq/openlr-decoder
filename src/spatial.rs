@@ -256,10 +256,22 @@ fn point_at_distance(coords: &[Coord<f64>], cum: &[f64], dist: f64) -> Point<f64
             } else {
                 0.0
             };
-            return Point::new(
-                coords[i].x + t * (coords[i + 1].x - coords[i].x),
-                coords[i].y + t * (coords[i + 1].y - coords[i].y),
-            );
+            // Wrap the longitude delta so segments crossing the antimeridian
+            // (e.g. 179.999 -> -179.999) interpolate across ±180 rather than
+            // the ~360° numeric path through longitude 0.
+            let mut dx = coords[i + 1].x - coords[i].x;
+            if dx > 180.0 {
+                dx -= 360.0;
+            } else if dx < -180.0 {
+                dx += 360.0;
+            }
+            let mut x = coords[i].x + t * dx;
+            if x > 180.0 {
+                x -= 360.0;
+            } else if x < -180.0 {
+                x += 360.0;
+            }
+            return Point::new(x, coords[i].y + t * (coords[i + 1].y - coords[i].y));
         }
     }
     Point::from(*coords.last().unwrap())
@@ -284,6 +296,20 @@ mod tests {
             (-94.5, 39.00027),
             (-94.49965, 39.00027),
         ])
+    }
+
+    #[test]
+    fn test_bearing_chord_across_antimeridian() {
+        // ~35 m due-east edge crossing the antimeridian at the equator.
+        let line = LineString::from(vec![(179.99985, 0.0), (-179.99985, 0.0)]);
+        let p = Point::new(179.99995, 0.0); // ~11 m along, mid-edge
+        let b = bearing_at_projection(p, &line, BearingDirection::Forward);
+        assert!(
+            (b - 90.0).abs() < 1.0,
+            "expected ~90° (due east) across the antimeridian, got {b}"
+        );
+        let b = bearing_at_projection(p, &line, BearingDirection::Backward);
+        assert!((b - 90.0).abs() < 1.0, "got {b}");
     }
 
     #[test]
