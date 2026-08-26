@@ -73,13 +73,37 @@ impl SpatialIndex {
         let delta_lat = radius_m / meters_per_deg_lat;
         let delta_lon = radius_m / meters_per_deg_lon;
 
-        let min_corner = [center.x() - delta_lon, center.y() - delta_lat];
-        let max_corner = [center.x() + delta_lon, center.y() + delta_lat];
-        let search_box = AABB::from_corners(min_corner, max_corner);
+        let (min_lon, max_lon) = (center.x() - delta_lon, center.x() + delta_lon);
+        let (min_lat, max_lat) = (center.y() - delta_lat, center.y() + delta_lat);
 
-        self.rtree
-            .locate_in_envelope_intersecting(&search_box)
-            .collect()
+        // A box that pokes past ±180 must also search the far side of the
+        // antimeridian, where those longitudes are actually stored.
+        let mut boxes = vec![AABB::from_corners(
+            [min_lon.max(-180.0), min_lat],
+            [max_lon.min(180.0), max_lat],
+        )];
+        if min_lon < -180.0 {
+            boxes.push(AABB::from_corners(
+                [min_lon + 360.0, min_lat],
+                [180.0, max_lat],
+            ));
+        }
+        if max_lon > 180.0 {
+            boxes.push(AABB::from_corners(
+                [-180.0, min_lat],
+                [max_lon - 360.0, max_lat],
+            ));
+        }
+
+        let mut results: Vec<&EdgeEnvelope> = boxes
+            .iter()
+            .flat_map(|b| self.rtree.locate_in_envelope_intersecting(b))
+            .collect();
+        if boxes.len() > 1 {
+            results.sort_by_key(|e| e.edge_idx);
+            results.dedup_by_key(|e| e.edge_idx);
+        }
+        results
     }
 
     pub fn len(&self) -> usize {
@@ -147,23 +171,49 @@ pub fn project_point_to_line_fraction(point: Point<f64>, line: &LineString<f64>)
     best_fraction.clamp(0.0, 1.0)
 }
 
-/// Project a point onto a line segment, returns (closest_point, fraction_along_segment)
+/// Wrap a longitude difference into [-180, 180] so arithmetic near the
+/// antimeridian follows the short path across ±180 instead of through 0.
+fn wrap_lon_delta(dx: f64) -> f64 {
+    if dx > 180.0 {
+        dx - 360.0
+    } else if dx < -180.0 {
+        dx + 360.0
+    } else {
+        dx
+    }
+}
+
+/// Normalize a longitude into [-180, 180].
+fn wrap_lon(x: f64) -> f64 {
+    if x > 180.0 {
+        x - 360.0
+    } else if x < -180.0 {
+        x + 360.0
+    } else {
+        x
+    }
+}
+
+/// Project a point onto a line segment, returns (closest_point, fraction_along_segment).
+/// Longitude deltas are wrapped so segments and query points near the antimeridian
+/// project correctly.
 fn project_point_to_segment(
     point: Point<f64>,
     p1: Point<f64>,
     p2: Point<f64>,
 ) -> (Point<f64>, f64) {
-    let dx = p2.x() - p1.x();
+    let dx = wrap_lon_delta(p2.x() - p1.x());
     let dy = p2.y() - p1.y();
 
     if dx == 0.0 && dy == 0.0 {
         return (p1, 0.0);
     }
 
-    let t = ((point.x() - p1.x()) * dx + (point.y() - p1.y()) * dy) / (dx * dx + dy * dy);
+    let px = wrap_lon_delta(point.x() - p1.x());
+    let t = (px * dx + (point.y() - p1.y()) * dy) / (dx * dx + dy * dy);
     let t_clamped = t.clamp(0.0, 1.0);
 
-    let closest = Point::new(p1.x() + t_clamped * dx, p1.y() + t_clamped * dy);
+    let closest = Point::new(wrap_lon(p1.x() + t_clamped * dx), p1.y() + t_clamped * dy);
     (closest, t_clamped)
 }
 
@@ -259,19 +309,11 @@ fn point_at_distance(coords: &[Coord<f64>], cum: &[f64], dist: f64) -> Point<f64
             // Wrap the longitude delta so segments crossing the antimeridian
             // (e.g. 179.999 -> -179.999) interpolate across ±180 rather than
             // the ~360° numeric path through longitude 0.
-            let mut dx = coords[i + 1].x - coords[i].x;
-            if dx > 180.0 {
-                dx -= 360.0;
-            } else if dx < -180.0 {
-                dx += 360.0;
-            }
-            let mut x = coords[i].x + t * dx;
-            if x > 180.0 {
-                x -= 360.0;
-            } else if x < -180.0 {
-                x += 360.0;
-            }
-            return Point::new(x, coords[i].y + t * (coords[i + 1].y - coords[i].y));
+            let dx = wrap_lon_delta(coords[i + 1].x - coords[i].x);
+            return Point::new(
+                wrap_lon(coords[i].x + t * dx),
+                coords[i].y + t * (coords[i + 1].y - coords[i].y),
+            );
         }
     }
     Point::from(*coords.last().unwrap())
@@ -296,6 +338,38 @@ mod tests {
             (-94.5, 39.00027),
             (-94.49965, 39.00027),
         ])
+    }
+
+    #[test]
+    fn test_projection_across_antimeridian() {
+        // Segment crossing 180°; query point on the west side of the line.
+        let (closest, frac) = project_point_to_segment(
+            Point::new(-179.99990, 0.0001),
+            Point::new(179.99985, 0.0),
+            Point::new(-179.99985, 0.0),
+        );
+        // 0.00025° of the 0.0003° span → t ≈ 0.833, at longitude ≈ -179.9999 (not near 0°).
+        assert!((frac - 0.8333).abs() < 0.01, "frac {frac}");
+        assert!(closest.x() < -179.999, "closest lon {}", closest.x());
+    }
+
+    #[test]
+    fn test_find_nearby_across_antimeridian() {
+        use crate::graph::{Edge, Fow, Frc, RoadNetwork};
+        let mut net = RoadNetwork::new();
+        net.get_or_add_node(1, Point::new(-179.9999, 0.0));
+        net.get_or_add_node(2, Point::new(-179.999, 0.0));
+        let geom = LineString::from(vec![(-179.9999, 0.0), (-179.999, 0.0)]);
+        let edge_idx = net.add_edge(
+            1,
+            2,
+            Edge::new(1, geom.clone(), Frc::Frc4, Fow::SingleCarriageway),
+        );
+        let idx = SpatialIndex::new(vec![EdgeEnvelope::new(edge_idx, &geom)]);
+        // Query from just east of the line (179.9999°): the 100m box crosses ±180
+        // and must still find the edge stored at -179.9999°.
+        let hits = idx.find_nearby(Point::new(179.9999, 0.0), 100.0);
+        assert_eq!(hits.len(), 1);
     }
 
     #[test]
