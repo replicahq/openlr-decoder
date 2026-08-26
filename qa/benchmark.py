@@ -112,9 +112,21 @@ def compute_metrics(decoded_geom: LineString, reference_geom) -> dict:
     lat_scale = 111_320.0
     lon_scale = 111_320.0 * np.cos(np.radians(center_lat))
 
+    center_lon = (decoded_geom.centroid.x + reference_geom.centroid.x) / 2
+
     def to_meters(geom):
+        # Wrap longitudes relative to the shared center so geometries near the
+        # antimeridian (Aleutians) don't jump ~360 degrees mid-line.
+        def wrap(lon):
+            d = lon - center_lon
+            if d > 180:
+                d -= 360
+            elif d < -180:
+                d += 360
+            return center_lon + d
+
         coords = list(geom.coords)
-        return LineString([(c[0] * lon_scale, c[1] * lat_scale) for c in coords])
+        return LineString([(wrap(c[0]) * lon_scale, c[1] * lat_scale) for c in coords])
 
     dec_m = to_meters(decoded_geom)
     ref_m = to_meters(reference_geom)
