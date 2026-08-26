@@ -263,11 +263,10 @@ cd ~/openlr-web && uv pip install --reinstall ~/openlr-decoder/target/wheels/ope
 
 ### Test corpus
 
-`qa/test_codes.csv` contains ~48K OpenLR codes with HERE reference geometries (from `bqutils.geo.openlr_to_geography`), randomly sampled from `model-159019.michelin.arity_link_matches_usa_v2` within the KC bounding box (38.53–39.11°N, 95.15–94.47°W). Network: `~/openlr-web/openlr_test_edges.parquet` (458K edges). NOTE: that file
-still has the pre-#25 `startVertex`/`endVertex` columns; the loader now requires
-`startOsmNode`/`endOsmNode`. Until it is regenerated, make a renamed copy
-(pyarrow `rename_columns`) to run the benchmark — barrier-node splits then remain,
-but A/B comparisons between decoder versions are still valid.
+`qa/test_codes.csv` contains ~48K OpenLR codes with HERE reference geometries (from `bqutils.geo.openlr_to_geography`), randomly sampled from `model-159019.michelin.arity_link_matches_usa_v2` within the KC bounding box (38.53–39.11°N, 95.15–94.47°W). Network: `~/openlr-web/openlr_test_edges.parquet` (487K edges, `startOsmNode`/`endOsmNode`
+ids). Regenerate it from BigQuery with `qa/regenerate_network.py` (run with the
+openlr-web venv python); it pulls the KC bbox from
+`model-159019.tomtom.tomtom_segments_updated_street_export_2025_Q2_1_5_0`.
 
 The benchmark reconstructs geometry from the meter offsets (`positive_offset`,
 `negative_offset`) expressed as fractions of the whole edge path.
