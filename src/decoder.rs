@@ -8,7 +8,7 @@ use thiserror::Error;
 
 use crate::candidates::{find_candidates, Candidate, CandidateConfig};
 use crate::graph::{Fow, Frc, RoadNetwork};
-use crate::spatial::SpatialIndex;
+use crate::spatial::{BearingDirection, SpatialIndex};
 
 /// A* search node for the priority queue
 #[derive(Clone)]
@@ -565,11 +565,17 @@ impl<'a> Decoder<'a> {
             let frc = Frc::from_u8(point.line.frc.value() as u8);
             let fow = Fow::from_u8(point.line.fow.value() as u8);
 
+            let direction = if i == points.len() - 1 {
+                BearingDirection::Backward
+            } else {
+                BearingDirection::Forward
+            };
             let candidates = find_candidates(
                 coord,
                 bearing,
                 frc,
                 fow,
+                direction,
                 self.network,
                 self.spatial,
                 &self.config.candidate_config,
@@ -719,11 +725,17 @@ impl<'a> Decoder<'a> {
             let frc = Frc::from_u8(point.line.frc.value() as u8);
             let fow = Fow::from_u8(point.line.fow.value() as u8);
 
+            let direction = if i == points.len() - 1 {
+                BearingDirection::Backward
+            } else {
+                BearingDirection::Forward
+            };
             let candidates = find_candidates(
                 coord,
                 bearing,
                 frc,
                 fow,
+                direction,
                 self.network,
                 self.spatial,
                 &self.config.candidate_config,

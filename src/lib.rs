@@ -14,4 +14,4 @@ pub use candidates::{find_candidates, Candidate, CandidateConfig};
 pub use decoder::{DecodeError, DecodedPath, Decoder, DecoderConfig};
 pub use graph::{Edge, Fow, Frc, Node, RoadNetwork};
 pub use loader::{load_network_from_parquet, load_openlr_codes, road_network_schema};
-pub use spatial::SpatialIndex;
+pub use spatial::{BearingDirection, SpatialIndex};

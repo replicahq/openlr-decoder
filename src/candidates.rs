@@ -2,7 +2,7 @@ use geo::{Closest, HaversineClosestPoint, HaversineDistance, Point};
 use petgraph::graph::EdgeIndex;
 
 use crate::graph::{Fow, Frc, RoadNetwork};
-use crate::spatial::{bearing_at_projection, bearing_difference, SpatialIndex};
+use crate::spatial::{bearing_at_projection, bearing_difference, BearingDirection, SpatialIndex};
 
 /// A candidate edge for matching an LRP
 #[derive(Debug, Clone)]
@@ -54,12 +54,17 @@ impl Default for CandidateConfig {
     }
 }
 
-/// Find and score candidate edges for an LRP
+/// Find and score candidate edges for an LRP.
+///
+/// `direction` selects which side of the projection point the edge bearing is measured on:
+/// `Forward` for first/intermediate LRPs (attributes describe the outgoing line),
+/// `Backward` for the last LRP (attributes describe the incoming line).
 pub fn find_candidates(
     coord: Point<f64>,
     bearing: f64,
     frc: Frc,
     fow: Fow,
+    direction: BearingDirection,
     network: &RoadNetwork,
     spatial: &SpatialIndex,
     config: &CandidateConfig,
@@ -89,7 +94,7 @@ pub fn find_candidates(
             }
 
             // Compute bearing at the projection point (where LRP projects onto edge)
-            let edge_bearing = bearing_at_projection(coord, &edge.geometry);
+            let edge_bearing = bearing_at_projection(coord, &edge.geometry, direction);
             let bearing_diff = bearing_difference(bearing, edge_bearing);
 
             // Check bearing tolerance (hard filter - bearing must be reasonably close)
@@ -154,36 +159,6 @@ fn compute_score(
         + config.bearing_weight * bearing_penalty
         + config.frc_weight * frc_penalty
         + config.fow_weight * fow_penalty
-}
-
-/// Find candidates for the start of a line (uses start bearing)
-pub fn find_start_candidates(
-    coord: Point<f64>,
-    bearing: f64,
-    frc: Frc,
-    fow: Fow,
-    network: &RoadNetwork,
-    spatial: &SpatialIndex,
-    config: &CandidateConfig,
-) -> Vec<Candidate> {
-    find_candidates(coord, bearing, frc, fow, network, spatial, config)
-}
-
-/// Find candidates for an intermediate or end LRP
-/// These need to match the incoming bearing (edge end bearing)
-pub fn find_end_candidates(
-    coord: Point<f64>,
-    bearing: f64,
-    frc: Frc,
-    fow: Fow,
-    network: &RoadNetwork,
-    spatial: &SpatialIndex,
-    config: &CandidateConfig,
-) -> Vec<Candidate> {
-    // For end points, we need to check the bearing at the end of edges
-    // leading into this point, which is slightly different logic
-    // For now, use the same function but this could be enhanced
-    find_candidates(coord, bearing, frc, fow, network, spatial, config)
 }
 
 #[cfg(test)]

@@ -167,9 +167,30 @@ fn project_point_to_segment(
     (closest, t_clamped)
 }
 
-/// Get the bearing at the closest point on a line to a query point
-/// Returns the bearing of the segment containing the closest point (0-360 degrees)
-pub fn bearing_at_projection(point: Point<f64>, line: &LineString<f64>) -> f64 {
+/// BEARDIST from the OpenLR spec (§5.2.4): bearing is measured over a 20 m chord.
+pub const BEARDIST_M: f64 = 20.0;
+
+/// Which side of the projection point the bearing chord is taken from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BearingDirection {
+    /// Chord from the projection point to BEARDIST further along the line
+    /// (first / intermediate LRPs, whose attributes describe the outgoing line).
+    Forward,
+    /// Chord from BEARDIST before the projection point up to it
+    /// (last LRP, whose attributes describe the incoming line).
+    Backward,
+}
+
+/// Bearing (0-360, in travel direction) of the line at the point closest to `point`,
+/// measured over a BEARDIST chord per OpenLR §5.2.4 rather than a single segment.
+/// If the line ends within BEARDIST in the requested direction the chord is clamped to
+/// the line end; if that leaves no usable chord the other direction is tried, and a
+/// degenerate line falls back to 0.0.
+pub fn bearing_at_projection(
+    point: Point<f64>,
+    line: &LineString<f64>,
+    direction: BearingDirection,
+) -> f64 {
     use geo::GeodesicBearing;
 
     let coords: Vec<Coord<f64>> = line.coords().cloned().collect();
@@ -177,32 +198,71 @@ pub fn bearing_at_projection(point: Point<f64>, line: &LineString<f64>) -> f64 {
         return 0.0;
     }
 
-    // Find closest segment
-    let mut best_dist = f64::MAX;
-    let mut best_segment_idx = 0;
-
+    // Cumulative distance at each vertex, and the projection's distance along the line.
+    let mut cum = Vec::with_capacity(coords.len());
+    cum.push(0.0);
     for i in 0..coords.len() - 1 {
-        let p1 = Point::new(coords[i].x, coords[i].y);
-        let p2 = Point::new(coords[i + 1].x, coords[i + 1].y);
-        let (closest, _) = project_point_to_segment(point, p1, p2);
-        let dist = point.haversine_distance(&closest);
+        let d = Point::from(coords[i]).haversine_distance(&Point::from(coords[i + 1]));
+        cum.push(cum[i] + d);
+    }
+    let total = *cum.last().unwrap();
 
+    let mut best_dist = f64::MAX;
+    let mut along = 0.0;
+    for i in 0..coords.len() - 1 {
+        let (closest, frac) =
+            project_point_to_segment(point, Point::from(coords[i]), Point::from(coords[i + 1]));
+        let dist = point.haversine_distance(&closest);
         if dist < best_dist {
             best_dist = dist;
-            best_segment_idx = i;
+            along = cum[i] + frac * (cum[i + 1] - cum[i]);
         }
     }
 
-    // Calculate bearing of the best segment
-    let p1 = Point::new(coords[best_segment_idx].x, coords[best_segment_idx].y);
-    let p2 = Point::new(
-        coords[best_segment_idx + 1].x,
-        coords[best_segment_idx + 1].y,
-    );
+    let proj = point_at_distance(&coords, &cum, along);
+    let chord = |dir: BearingDirection| -> Option<(Point<f64>, Point<f64>)> {
+        let (a, b) = match dir {
+            BearingDirection::Forward => (
+                proj,
+                point_at_distance(&coords, &cum, (along + BEARDIST_M).min(total)),
+            ),
+            BearingDirection::Backward => (
+                point_at_distance(&coords, &cum, (along - BEARDIST_M).max(0.0)),
+                proj,
+            ),
+        };
+        (a.haversine_distance(&b) > 0.5).then_some((a, b))
+    };
+    let other = match direction {
+        BearingDirection::Forward => BearingDirection::Backward,
+        BearingDirection::Backward => BearingDirection::Forward,
+    };
+    let Some((a, b)) = chord(direction).or_else(|| chord(other)) else {
+        return 0.0;
+    };
 
-    let bearing = p1.geodesic_bearing(p2);
-    // Normalize to 0-360
+    let bearing = a.geodesic_bearing(b);
     ((bearing % 360.0) + 360.0) % 360.0
+}
+
+/// Interpolate the point `dist` meters along a polyline with cumulative lengths `cum`.
+fn point_at_distance(coords: &[Coord<f64>], cum: &[f64], dist: f64) -> Point<f64> {
+    let dist = dist.clamp(0.0, *cum.last().unwrap());
+    for i in 0..coords.len() - 1 {
+        if dist <= cum[i + 1] {
+            let seg = cum[i + 1] - cum[i];
+            let t = if seg > 0.0 {
+                (dist - cum[i]) / seg
+            } else {
+                0.0
+            };
+            return Point::new(
+                coords[i].x + t * (coords[i + 1].x - coords[i].x),
+                coords[i].y + t * (coords[i + 1].y - coords[i].y),
+            );
+        }
+    }
+    Point::from(*coords.last().unwrap())
 }
 
 #[cfg(test)]
@@ -214,6 +274,54 @@ mod tests {
         assert!((bearing_difference(10.0, 20.0) - 10.0).abs() < 0.01);
         assert!((bearing_difference(350.0, 10.0) - 20.0).abs() < 0.01);
         assert!((bearing_difference(180.0, 0.0) - 180.0).abs() < 0.01);
+    }
+
+    // ~1e-4 deg lat ≈ 11 m; ~1e-4 deg lon ≈ 8.7 m at 39°N.
+    // Line: 30 m due north, then 30 m due east.
+    fn kinked_line() -> LineString<f64> {
+        LineString::from(vec![
+            (-94.5, 39.0),
+            (-94.5, 39.00027),
+            (-94.49965, 39.00027),
+        ])
+    }
+
+    #[test]
+    fn test_bearing_forward_chord_spans_kink() {
+        // Project 15 m up the north leg: the next 20 m covers 15 m north + 5 m east,
+        // so the chord bearing is NNE, not the segment's due-north.
+        let p = Point::new(-94.5, 39.000135);
+        let b = bearing_at_projection(p, &kinked_line(), BearingDirection::Forward);
+        assert!(b > 10.0 && b < 25.0, "got {b}");
+    }
+
+    #[test]
+    fn test_bearing_backward_chord_spans_kink() {
+        // Project 15 m along the east leg: the previous 20 m covers 5 m north + 15 m east.
+        let p = Point::new(-94.499826, 39.00027);
+        let b = bearing_at_projection(p, &kinked_line(), BearingDirection::Backward);
+        assert!(b > 65.0 && b < 80.0, "got {b}");
+    }
+
+    #[test]
+    fn test_bearing_clamps_at_line_end() {
+        // Near the end of the line, Forward has <20 m left; chord clamps to the end (east).
+        let p = Point::new(-94.49970, 39.00027);
+        let b = bearing_at_projection(p, &kinked_line(), BearingDirection::Forward);
+        assert!((b - 90.0).abs() < 2.0, "got {b}");
+        // At the very end, Forward has no chord and falls back to Backward.
+        let p = Point::new(-94.49965, 39.00027);
+        let b = bearing_at_projection(p, &kinked_line(), BearingDirection::Forward);
+        assert!(b > 60.0 && b < 90.0, "got {b}");
+    }
+
+    #[test]
+    fn test_bearing_straight_line_both_directions_agree() {
+        let line = LineString::from(vec![(-94.5, 39.0), (-94.5, 39.001)]);
+        let p = Point::new(-94.5001, 39.0005);
+        let f = bearing_at_projection(p, &line, BearingDirection::Forward);
+        let b = bearing_at_projection(p, &line, BearingDirection::Backward);
+        assert!(f.abs() < 0.5 && b.abs() < 0.5, "got {f} {b}");
     }
 
     #[test]
