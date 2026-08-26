@@ -24,3 +24,5 @@ site/
 # OS
 .DS_Store
 tags
+qa/screenshots/
+qa/results/
