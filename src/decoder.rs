@@ -290,12 +290,11 @@ pub struct DecoderConfig {
     /// the first junction and the added length is absorbed into the offsets, so
     /// the LRP-to-LRP geometry is unchanged. Default true.
     pub snap_to_valid_nodes: bool,
-    /// Absolute cap (meters) on how far a terminal-node snap may extend a path
-    /// at each end. Default 25m.
+    /// Cap (meters) on how far a terminal-node snap may extend a path at each end.
+    /// The extension must also keep the segment within the length tolerance.
+    /// Default 25m. (Not scaled by DNP: HERE links are often only 20–40m long and
+    /// still stop short of a junction by a ~7–10m crossing stub.)
     pub max_snap_extension_m: f64,
-    /// Cap on terminal-node snap length as a fraction of the adjacent segment's DNP.
-    /// The effective cap is `min(max_snap_extension_m, fraction * dnp)`. Default 0.10.
-    pub max_snap_extension_fraction: f64,
 }
 
 impl Default for DecoderConfig {
@@ -309,7 +308,6 @@ impl Default for DecoderConfig {
             access_road_cost_penalty: 10.0, // 10m penalty gently prefers tertiary over residential
             snap_to_valid_nodes: true,
             max_snap_extension_m: 25.0,
-            max_snap_extension_fraction: 0.10,
         }
     }
 }
@@ -350,10 +348,7 @@ impl<'a> Decoder<'a> {
         if !self.config.snap_to_valid_nodes {
             return 0.0;
         }
-        let cap = self
-            .config
-            .max_snap_extension_m
-            .min(self.config.max_snap_extension_fraction * seg.expected_m);
+        let cap = self.config.max_snap_extension_m;
         let headroom = self.max_valid_distance(seg.expected_m) - seg.length_m;
         cap.min(headroom).max(0.0)
     }
@@ -2102,7 +2097,7 @@ mod tests {
     }
 
     #[test]
-    fn test_snap_respects_dnp_fraction_and_length_headroom() {
+    fn test_snap_respects_length_headroom() {
         let (network, spatial) = snap_network();
         let decoder = Decoder::new(&network, &spatial);
         let mut path = vec![edge_by_id(&network, 1), edge_by_id(&network, 2)];
@@ -2114,14 +2109,6 @@ mod tests {
             .node(network.edge_target(edge_by_id(&network, 3)).unwrap())
             .unwrap()
             .coord;
-
-        // 10% of a 100m DNP = 10m < 15m → no snap
-        let short_dnp = SegmentInfo {
-            length_m: 200.0,
-            expected_m: 100.0,
-        };
-        decoder.finalize_path(&mut path, n1, n4, short_dnp, short_dnp);
-        assert_eq!(ids(&network, &path), vec![1, 2]);
 
         // Segment already at max_valid_distance (DNP 200 → max 300) → no headroom
         let no_headroom = SegmentInfo {
@@ -2180,7 +2167,7 @@ mod tests {
         let decoder = decoder.with_config(config);
         let seg = SegmentInfo {
             length_m: 115.0,
-            expected_m: 1500.0, // 10% = 150m ≥ 100m
+            expected_m: 1500.0,
         };
 
         let offsets = decoder.finalize_path(&mut path, n2, n5, seg, seg);

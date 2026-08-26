@@ -158,12 +158,9 @@ pub struct PyDecoderConfig {
     /// Rule 4, folding the extra length into the offsets. Default True.
     #[pyo3(get, set)]
     pub snap_to_valid_nodes: bool,
-    /// Absolute cap in meters on a terminal-node snap at each end. Default 25m.
+    /// Cap in meters on a terminal-node snap at each end. Default 25m.
     #[pyo3(get, set)]
     pub max_snap_extension_m: f64,
-    /// Cap on terminal-node snap as a fraction of the adjacent segment DNP. Default 0.10.
-    #[pyo3(get, set)]
-    pub max_snap_extension_fraction: f64,
 }
 
 #[pymethods]
@@ -187,8 +184,7 @@ impl PyDecoderConfig {
         slip_road_cost_penalty = 20.0,
         access_road_cost_penalty = 10.0,
         snap_to_valid_nodes = true,
-        max_snap_extension_m = 25.0,
-        max_snap_extension_fraction = 0.10
+        max_snap_extension_m = 25.0
     ))]
     fn new(
         search_radius_m: f64,
@@ -207,7 +203,6 @@ impl PyDecoderConfig {
         access_road_cost_penalty: f64,
         snap_to_valid_nodes: bool,
         max_snap_extension_m: f64,
-        max_snap_extension_fraction: f64,
     ) -> Self {
         PyDecoderConfig {
             search_radius_m,
@@ -226,7 +221,6 @@ impl PyDecoderConfig {
             access_road_cost_penalty,
             snap_to_valid_nodes,
             max_snap_extension_m,
-            max_snap_extension_fraction,
         }
     }
 
@@ -237,7 +231,7 @@ impl PyDecoderConfig {
              absolute_length_tolerance={}, max_search_distance_factor={}, \
              distance_weight={}, bearing_weight={}, frc_weight={}, fow_weight={}, \
              slip_road_cost_penalty={}, access_road_cost_penalty={}, \
-             snap_to_valid_nodes={}, max_snap_extension_m={}, max_snap_extension_fraction={})",
+             snap_to_valid_nodes={}, max_snap_extension_m={})",
             self.search_radius_m,
             self.max_bearing_diff,
             self.frc_tolerance,
@@ -253,8 +247,7 @@ impl PyDecoderConfig {
             self.slip_road_cost_penalty,
             self.access_road_cost_penalty,
             self.snap_to_valid_nodes,
-            self.max_snap_extension_m,
-            self.max_snap_extension_fraction
+            self.max_snap_extension_m
         )
     }
 }
@@ -280,7 +273,6 @@ impl From<&PyDecoderConfig> for DecoderConfig {
             access_road_cost_penalty: config.access_road_cost_penalty,
             snap_to_valid_nodes: config.snap_to_valid_nodes,
             max_snap_extension_m: config.max_snap_extension_m,
-            max_snap_extension_fraction: config.max_snap_extension_fraction,
         }
     }
 }
