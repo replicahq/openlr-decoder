@@ -136,6 +136,22 @@ The app shows:
 - Background network edges (hover to see edge IDs)
 - Success/failure status with error messages
 
+### Screenshots without a browser
+
+The web app exposes `GET|POST /api/screenshot.png`, a matplotlib render of the same
+data the UI shows (background edges, LRPs + bearings, decoded edges, offset-trimmed
+geometry, optional HERE reference WKT). `compare_config` renders before/after panels;
+`focus_lrp` + `span_m` zoom on an endpoint. `qa/screenshot.py` wraps it:
+
+```bash
+# server running with the network loaded (see above), then:
+~/openlr-web/.venv/bin/python qa/screenshot.py CODE --out qa/screenshots/<topic> \
+  --before '{"snap_to_valid_nodes": false}' --after '{"snap_to_valid_nodes": true}' \
+  --titles "before|after" --zoom-lrps 0 1
+```
+
+Use this to attach visual evidence to PRs and to inspect benchmark regressions.
+
 ### Common Failure Modes
 
 1. **"No candidates found for LRP N"**
