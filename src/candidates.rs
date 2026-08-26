@@ -23,10 +23,8 @@ pub struct CandidateConfig {
     pub max_bearing_diff: f64,
     pub frc_tolerance: u8,
     pub max_candidates: usize,
-    /// Maximum distance (meters) that at least ONE LRP's best candidate must fall within
-    /// for the decode to proceed. This is not a per-candidate filter: individual candidates
-    /// are still accepted up to `search_radius_m`. It rejects references where no LRP has a
-    /// close spatial match, while tolerating a single LRP outside network coverage.
+    /// At least one LRP must have a candidate within this distance (meters) for the
+    /// decode to proceed. Not a per-candidate filter; those go up to `search_radius_m`.
     pub max_candidate_distance_m: f64,
     // Scoring weights (lower score is better)
     pub distance_weight: f64,

@@ -119,74 +119,24 @@ Key design decisions driven by this:
 
 5. **Same-edge handling**: Short segments where both LRPs fall on the same OSM edge need special relaxed length checking.
 
-## Known Deviations from the OpenLR Whitepaper (v1.5)
+## Deviations from the OpenLR Whitepaper (v1.5)
 
-This decoder is tuned for HERE-encoded data and intentionally departs from the whitepaper
-(`openlr-whitepaper_v1.5.pdf`, Chapter G §12) in several places. Some deviations follow HERE's
-encoder behavior rather than the spec; others are unimplemented spec features. Keep these in mind
-when interpreting results or when feeding in codes from a non-HERE encoder.
+Verified against the 47,931-code KC corpus where noted.
 
-### HERE-isms (code matches HERE, not the spec)
+**Follows HERE, not the spec**
+- **Last-LRP bearing** is matched in the travel direction. The spec (§5.2.4, Table 74) points it *back* along the incoming line. HERE uses travel direction in 100% of corpus codes; spec-conformant encoders (e.g. TomTom) will fail the ±90° filter on the last LRP.
+- **Encoded offsets are ignored** (0 of 47,931 corpus codes have one). `positive_offset`/`negative_offset` on the result are the first/last LRP's projection distance onto the first/last edge — not the spec's offsets.
 
-1. **Last-LRP bearing direction.** Spec §5.4.2 says the last LRP's attributes describe the
-   *incoming* line, and §5.2.4 measures its bearing from the LRP coordinate back along that line
-   (worked example, Table 74: bearing 290° for a line travelling ~110°). HERE instead encodes the
-   last LRP's bearing in the **direction of travel** — verified on all 47,931 codes in
-   `qa/test_codes.csv` (last-LRP bearing within 30° of the LRP1→LRP2 chord in 100% of cases).
-   `find_candidates` therefore compares *every* LRP against the edge's travel-direction bearing.
-   Codes from a spec-conformant encoder (TomTom, the `openlr` Python/Java encoders) will have the
-   last LRP ~180° off and fail the ±90° bearing filter with "No candidates found for LRP N".
+**Not implemented**
+- **≥3 LRPs**: segments are solved pairwise; the intermediate LRP is not forced onto one shared edge (§12.1 Step 5). Untested — corpus is all 2-LRP.
+- **PointAlongLine** returns the path; offset, side-of-road and orientation are not applied.
+- **Bearing** uses the projection segment, not the 20 m BEARDIST chord (§5.2.4).
+- **FOW**: no `junction`/`oneway` columns, so `Roundabout` never occurs and `MultipleCarriageway` only via `lanes >= 4`.
+- GeoCoordinate, POI, area types and ClosedLine are unsupported.
 
-2. **Binary offsets are ignored.** Spec §7.5.2 / §12.10 / §12.1 Step 7 trim the path by the
-   encoded positive/negative offsets (a 1/256 fraction of the distance between the first two /
-   last two LRPs). HERE always encodes them as 0 (0 of 47,931 corpus codes have a non-zero offset),
-   so `decode_line` never reads `line.offsets`. **`DecodedPath.positive_offset` /
-   `negative_offset` do not mean what the spec means**: they are the distance from the start of
-   the first edge to the first LRP's projection (and from the last LRP's projection to the end of
-   the last edge). Any code that does carry a non-zero offset will decode without trimming.
-
-3. **FRC range.** Only FRC0–FRC4 appear in HERE data (HERE FC1–FC5); the loader maps non-navigable
-   OSM ways to FRC7 so they never match. The corpus is ~80% FRC4, so FRC contributes little
-   discrimination in practice.
-
-### Spec features not implemented
-
-4. **No cross-pair consistency for ≥3 LRPs.** §12.1 Step 5 notes that changing the candidate for
-   an intermediate LRP requires re-solving the previous segment. `decode_line` solves each
-   consecutive LRP pair independently; the edge chosen for LRP *i* as the *end* of segment
-   (i-1, i) is not forced to be the *start* of segment (i, i+1). Concatenation only dedupes when
-   both segments happen to pick the same edge. The corpus is 100% two-LRP codes, so this is
-   untested on real data and may produce gaps or overlaps at intermediate LRPs.
-
-5. **PointAlongLine returns a path, not a point.** §12.3 Step 7 resolves a point via the positive
-   offset plus side-of-road / orientation. `decode_point_along_line` runs the line pipeline and
-   returns the full path; offset, SOR and ORI are not applied or exposed.
-
-6. **Bearing is measured on one geometry segment, not over BEARDIST.** §5.2.4 defines bearing to
-   the point 20 m along the line. `spatial::bearing_at_projection` uses the bearing of the single
-   segment containing the projection point, which is noisier on densely-noded OSM curves.
-
-7. **FOW inference is partial.** `Fow::from_osm_tags` supports `junction=roundabout` and
-   `oneway`, but the parquet schema has neither column, so the loader passes `None` for both.
-   The network never contains `Roundabout`; `MultipleCarriageway` arises only from `lanes >= 4`.
-
-8. **Unsupported location types.** GeoCoordinate, POI-with-access-point, Circle, Rectangle, Grid,
-   Polygon and ClosedLine return `UnsupportedType`.
-
-9. **Lengths are floats.** Spec Rule 2 says integer metres. Harmless given the tolerances.
-
-### Implementation notes worth knowing
-
-- **Shortest path is not strictly shortest.** A* adds soft penalties (slip road 20 m, access
-  road 10 m) so route choice prefers main roads; reported `length` is the real, unpenalised length.
-- **LFRCNP filter is widened** by `frc_tolerance` and exempts `SlipRoad` edges, since OSM
-  `*_link` ways map to FRC3 even when they connect motorways. The spec allows this
-  ("this value might be altered if the decoder anticipates different FRC values").
-- **`max_candidate_distance_m` is not a per-LRP filter.** Only *one* LRP in the reference must
-  have a candidate within this distance; other LRPs may match anything within `search_radius_m`.
-  This tolerates one LRP falling outside network coverage.
-- **Start/end edges contributing <3% of the path are dropped from `edge_ids`** but their partial
-  length is still included in `length`, so the edge list can cover less than `length`.
+**Easy to misread**
+- `max_candidate_distance_m` gates the decode on *one* LRP having a close candidate; others may match up to `search_radius_m`.
+- Start/end edges under 3% of the path are dropped from `edge_ids` but still counted in `length`.
 
 ## Testing & Debugging Bad Matches
 
