@@ -23,9 +23,10 @@ pub struct CandidateConfig {
     pub max_bearing_diff: f64,
     pub frc_tolerance: u8,
     pub max_candidates: usize,
-    /// Maximum distance from LRP to edge for a valid candidate (meters).
-    /// Candidates beyond this distance are rejected even if they pass other filters.
-    /// This prevents matching to far-away roads when the correct road is missing.
+    /// Maximum distance (meters) that at least ONE LRP's best candidate must fall within
+    /// for the decode to proceed. This is not a per-candidate filter: individual candidates
+    /// are still accepted up to `search_radius_m`. It rejects references where no LRP has a
+    /// close spatial match, while tolerating a single LRP outside network coverage.
     pub max_candidate_distance_m: f64,
     // Scoring weights (lower score is better)
     pub distance_weight: f64,
@@ -41,7 +42,7 @@ impl Default for CandidateConfig {
             max_bearing_diff: 90.0, // ±90 degrees bearing tolerance (generous for cross-provider curving roads)
             frc_tolerance: 2,       // Allow ±2 FRC classes
             max_candidates: 10,     // Keep top 10 candidates
-            max_candidate_distance_m: 35.0, // Reject candidates > 35m from LRP
+            max_candidate_distance_m: 35.0, // At least one LRP must have a candidate within 35m
             // Scoring weights for cross-provider decoding (lower score is better):
             // Distance heavily dominates - a spatially close match with wrong FRC/FOW
             // is almost always better than a farther match with correct attributes.

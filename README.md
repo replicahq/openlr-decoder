@@ -83,6 +83,23 @@ decoder = Decoder(network, config)
 
 See the [Configuration Guide](https://replicahq.github.io/openlr-decoder/configuration/) for all 14 parameters.
 
+## Deviations from the OpenLR Spec
+
+This decoder targets **HERE-encoded** OpenLR on OSM networks and deliberately follows HERE's
+encoder behaviour where it differs from the OpenLR whitepaper:
+
+- **Last-LRP bearing** is matched in the direction of travel (HERE), not against the incoming
+  line as the spec defines. Codes from spec-conformant encoders (e.g. TomTom) may fail to decode.
+- **Encoded offsets are ignored** (HERE always sets them to 0). `positive_offset` /
+  `negative_offset` on the result are *projection* distances of the first/last LRP onto the
+  first/last edge — not the spec's offset values.
+- **PointAlongLine** decodes to the underlying path; the point offset and side-of-road are not
+  applied. Area and GeoCoordinate types are unsupported.
+- **References with 3+ LRPs** are solved pairwise without enforcing a shared edge at intermediate
+  LRPs.
+
+See `CLAUDE.md` → "Known Deviations from the OpenLR Whitepaper" for the full list.
+
 ## License
 
 MIT
