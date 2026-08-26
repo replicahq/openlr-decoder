@@ -154,6 +154,13 @@ pub struct PyDecoderConfig {
     /// service, track) in A* search. Makes decoder prefer tertiary over residential. Default 10m.
     #[pyo3(get, set)]
     pub access_road_cost_penalty: f64,
+    /// Extend decoded paths so they start/end on valid (junction) nodes per OpenLR
+    /// Rule 4, folding the extra length into the offsets. Default True.
+    #[pyo3(get, set)]
+    pub snap_to_valid_nodes: bool,
+    /// Cap in meters on a terminal-node snap at each end. Default 25m.
+    #[pyo3(get, set)]
+    pub max_snap_extension_m: f64,
 }
 
 #[pymethods]
@@ -175,7 +182,9 @@ impl PyDecoderConfig {
         frc_weight = 0.1,
         fow_weight = 0.1,
         slip_road_cost_penalty = 20.0,
-        access_road_cost_penalty = 10.0
+        access_road_cost_penalty = 10.0,
+        snap_to_valid_nodes = true,
+        max_snap_extension_m = 25.0
     ))]
     fn new(
         search_radius_m: f64,
@@ -192,6 +201,8 @@ impl PyDecoderConfig {
         fow_weight: f64,
         slip_road_cost_penalty: f64,
         access_road_cost_penalty: f64,
+        snap_to_valid_nodes: bool,
+        max_snap_extension_m: f64,
     ) -> Self {
         PyDecoderConfig {
             search_radius_m,
@@ -208,6 +219,8 @@ impl PyDecoderConfig {
             fow_weight,
             slip_road_cost_penalty,
             access_road_cost_penalty,
+            snap_to_valid_nodes,
+            max_snap_extension_m,
         }
     }
 
@@ -217,7 +230,8 @@ impl PyDecoderConfig {
              max_candidates={}, max_candidate_distance_m={}, length_tolerance={}, \
              absolute_length_tolerance={}, max_search_distance_factor={}, \
              distance_weight={}, bearing_weight={}, frc_weight={}, fow_weight={}, \
-             slip_road_cost_penalty={}, access_road_cost_penalty={})",
+             slip_road_cost_penalty={}, access_road_cost_penalty={}, \
+             snap_to_valid_nodes={}, max_snap_extension_m={})",
             self.search_radius_m,
             self.max_bearing_diff,
             self.frc_tolerance,
@@ -231,7 +245,9 @@ impl PyDecoderConfig {
             self.frc_weight,
             self.fow_weight,
             self.slip_road_cost_penalty,
-            self.access_road_cost_penalty
+            self.access_road_cost_penalty,
+            self.snap_to_valid_nodes,
+            self.max_snap_extension_m
         )
     }
 }
@@ -255,6 +271,8 @@ impl From<&PyDecoderConfig> for DecoderConfig {
             max_search_distance_factor: config.max_search_distance_factor,
             slip_road_cost_penalty: config.slip_road_cost_penalty,
             access_road_cost_penalty: config.access_road_cost_penalty,
+            snap_to_valid_nodes: config.snap_to_valid_nodes,
+            max_snap_extension_m: config.max_snap_extension_m,
         }
     }
 }

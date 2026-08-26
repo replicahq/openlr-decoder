@@ -155,6 +155,24 @@ The app shows:
 - Background network edges (hover to see edge IDs)
 - Success/failure status with error messages
 
+### Screenshots of the real UI
+
+The web app exposes `GET|POST /api/screenshot.png`: it opens its own page in headless
+Chromium (Playwright) with `?code=…&config=<json>`, waits for the decode to render, and
+returns a PNG — exactly what a user sees. `focus_lrp` + `span_m` zoom on an endpoint,
+`map_only=true` crops out the sidebar, `scale=2` gives retina output. The same URL
+parameters work in a normal browser for shareable links. `qa/screenshot.py` wraps it
+and stitches before/after configs side by side:
+
+```bash
+# server running with the network loaded (see above), then:
+~/openlr-web/.venv/bin/python qa/screenshot.py CODE --out qa/screenshots/<topic> \
+  --before '{"snap_to_valid_nodes": false}' --after '{"snap_to_valid_nodes": true}' \
+  --zoom-lrps 0 1 --span-m 50
+```
+
+Use this to attach visual evidence to PRs and to inspect benchmark regressions.
+
 ### Common Failure Modes
 
 1. **"No candidates found for LRP N"**
@@ -211,8 +229,28 @@ config = DecoderConfig(
     max_candidates=10,        # More candidates = more path options
     length_tolerance=0.35,    # 35% relative tolerance
     frc_tolerance=2,          # Allow ±2 FRC class difference
+    snap_to_valid_nodes=True, # Extend path ends to junctions (OpenLR Rule 4)
+    max_snap_extension_m=25.0,
 )
 ```
+
+### Terminal-node snap (OpenLR Rule 4)
+
+Encoders place LRPs on *valid* nodes (junctions); a node with one way in and one
+way out is invalid because a route search can step over it. After path selection
+the decoder checks whether the path starts/ends on an invalid node and, if so,
+follows the forced continuation to the first junction (`RoadNetwork::is_valid_node`,
+`forced_continuation`, `forced_predecessor` in `graph.rs`; `finalize_path` in
+`decoder.rs`). The added length is folded into `positive_offset`/`negative_offset`,
+so the offset-trimmed geometry is unchanged — only the edge set grows. Extension is
+capped at `max_snap_extension_m` (25 m; deliberately not scaled by DNP — HERE links are
+often only 20–40 m long and still stop a ~7–10 m crossing stub short of the junction),
+must keep the segment within the length tolerance, and is only applied when the LRP coordinate is
+closer to the new terminal node than to the current one — this guards against HERE
+having a junction our OSM car graph lacks (measured on the KC corpus: the guard removed
+all ~100 such overshoots while keeping every extension that landed on HERE's endpoint). Because the offset then spans more
+than one edge, `*_offset_fraction` (relative to the first/last edge) can exceed 1.0;
+the meter offsets are authoritative.
 
 ## Building & Testing
 
@@ -242,11 +280,14 @@ The `qa/` directory contains tooling for measuring decode quality across a 48K-c
 
 ```bash
 # 1. Build the version you want to test and install into the openlr-web venv
-maturin build --release -i python3.12
-cd ~/openlr-web && uv pip install --reinstall ~/openlr-decoder/target/wheels/openlr_decoder-*-cp312-*.whl
+# (match the venv's interpreter: `~/openlr-web/.venv/bin/python --version`)
+uvx maturin build --release -i python3.11
+cd ~/openlr-web && uv pip install --reinstall ~/openlr-decoder/target/wheels/openlr_decoder-*-cp311-*.whl
 
 # 2. Run benchmark (saves results keyed by commit hash)
+#    --config accepts DecoderConfig overrides (ints, floats, true/false)
 ~/openlr-web/.venv/bin/python qa/benchmark.py \
+  --network ~/openlr-web/openlr_test_edges.parquet \
   --save qa/results/$(git rev-parse --short HEAD).parquet
 
 # 3. Compare two runs
@@ -263,7 +304,13 @@ cd ~/openlr-web && uv pip install --reinstall ~/openlr-decoder/target/wheels/ope
 
 ### Test corpus
 
-`qa/test_codes.csv` contains ~48K OpenLR codes with HERE reference geometries (from `bqutils.geo.openlr_to_geography`), randomly sampled from `model-159019.michelin.arity_link_matches_usa_v2` within the KC bounding box (38.53–39.11°N, 95.15–94.47°W). Network: `openlr_test_edges.parquet` (458K edges).
+`qa/test_codes.csv` contains ~48K OpenLR codes with HERE reference geometries (from `bqutils.geo.openlr_to_geography`), randomly sampled from `model-159019.michelin.arity_link_matches_usa_v2` within the KC bounding box (38.53–39.11°N, 95.15–94.47°W). Network: `~/openlr-web/openlr_test_edges.parquet` (487K edges, `startOsmNode`/`endOsmNode`
+ids). Regenerate it from BigQuery with `qa/regenerate_network.py` (run with the
+openlr-web venv python); it pulls the KC bbox from
+`model-159019.tomtom.tomtom_segments_updated_street_export_2025_Q2_1_5_0`.
+
+The benchmark reconstructs geometry from the meter offsets (`positive_offset`,
+`negative_offset`) expressed as fractions of the whole edge path.
 
 ## Parquet Schema (Network Input)
 
