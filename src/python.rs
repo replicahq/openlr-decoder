@@ -35,8 +35,11 @@ impl PyRoadNetwork {
     ///     RoadNetwork: The loaded road network ready for decoding
     #[staticmethod]
     #[pyo3(signature = (path))]
-    fn from_parquet(path: &str) -> PyResult<Self> {
-        let (network, spatial) = load_network_from_parquet(Path::new(path))
+    fn from_parquet(py: Python<'_>, path: &str) -> PyResult<Self> {
+        // Parquet I/O and graph construction touch no Python objects, so run
+        // them with the GIL released.
+        let (network, spatial) = py
+            .detach(|| load_network_from_parquet(Path::new(path)))
             .map_err(|e| PyValueError::new_err(format!("Failed to load network: {}", e)))?;
 
         Ok(PyRoadNetwork {
@@ -73,19 +76,25 @@ impl PyRoadNetwork {
     ///     >>> network = RoadNetwork.from_arrow(df)  # Zero-copy!
     #[staticmethod]
     #[pyo3(signature = (data))]
-    fn from_arrow(data: PyRecordBatchReader) -> PyResult<Self> {
+    fn from_arrow(py: Python<'_>, data: PyRecordBatchReader) -> PyResult<Self> {
         // Convert to arrow-rs RecordBatchReader via pyo3-arrow (zero-copy)
         let reader = data
             .into_reader()
             .map_err(|e| PyValueError::new_err(format!("Failed to read Arrow data: {}", e)))?;
 
-        // Build network from the batches
-        let (network, spatial) = build_network_from_batches(
-            reader.map(|r| r.map_err(|e| anyhow::anyhow!(e))),
-        )
-        .map_err(|e| {
-            PyValueError::new_err(format!("Failed to build network from Arrow data: {}", e))
-        })?;
+        // Drain the stream while we still hold the GIL: the producer may be
+        // implemented in Python, so pulling batches is not GIL-free. The batches
+        // themselves are zero-copy views over the caller's buffers.
+        let batches: Vec<RecordBatch> = reader
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| PyValueError::new_err(format!("Failed to read Arrow data: {}", e)))?;
+
+        // Graph construction is pure Rust; release the GIL for it.
+        let (network, spatial) = py
+            .detach(|| build_network_from_batches(batches.into_iter().map(Ok)))
+            .map_err(|e| {
+                PyValueError::new_err(format!("Failed to build network from Arrow data: {}", e))
+            })?;
 
         Ok(PyRoadNetwork {
             network: Arc::new(network),
@@ -373,13 +382,15 @@ impl PyDecoder {
     ///
     /// Raises:
     ///     ValueError: If decoding fails
-    fn decode(&self, openlr_base64: &str) -> PyResult<PyDecodedPath> {
-        let decoder = Decoder::new(&self.network, &self.spatial).with_config(self.config.clone());
-
-        decoder
-            .decode(openlr_base64)
-            .map(PyDecodedPath::from)
-            .map_err(|e| PyValueError::new_err(decode_error_message(e)))
+    fn decode(&self, py: Python<'_>, openlr_base64: &str) -> PyResult<PyDecodedPath> {
+        // Decoding is pure Rust; release the GIL so other threads can run.
+        py.detach(|| {
+            let decoder =
+                Decoder::new(&self.network, &self.spatial).with_config(self.config.clone());
+            decoder.decode(openlr_base64)
+        })
+        .map(PyDecodedPath::from)
+        .map_err(|e| PyValueError::new_err(decode_error_message(e)))
     }
 
     /// Decode multiple OpenLR strings in parallel
