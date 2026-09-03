@@ -14,7 +14,7 @@ use rayon::prelude::*;
 use crate::candidates::CandidateConfig;
 use crate::decoder::{DecodeError, DecodedPath, Decoder, DecoderConfig};
 use crate::graph::RoadNetwork;
-use crate::loader::{build_network_from_batches, load_network_from_parquet};
+use crate::loader::{load_network_from_parquet, NetworkBuilder};
 use crate::spatial::SpatialIndex;
 
 /// Python-exposed road network loaded from parquet
@@ -82,19 +82,19 @@ impl PyRoadNetwork {
             .into_reader()
             .map_err(|e| PyValueError::new_err(format!("Failed to read Arrow data: {}", e)))?;
 
-        // Drain the stream while we still hold the GIL: the producer may be
-        // implemented in Python, so pulling batches is not GIL-free. The batches
-        // themselves are zero-copy views over the caller's buffers.
-        let batches: Vec<RecordBatch> = reader
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| PyValueError::new_err(format!("Failed to read Arrow data: {}", e)))?;
-
-        // Graph construction is pure Rust; release the GIL for it.
-        let (network, spatial) = py
-            .detach(|| build_network_from_batches(batches.into_iter().map(Ok)))
-            .map_err(|e| {
+        // Pull batches with the GIL held — the stream's producer may be implemented
+        // in Python — but release it for the graph construction, which is the
+        // expensive part and touches no Python objects. Each batch is dropped before
+        // the next is fetched, so a streaming reader is still consumed incrementally.
+        let mut builder = NetworkBuilder::default();
+        for batch in reader {
+            let batch = batch
+                .map_err(|e| PyValueError::new_err(format!("Failed to read Arrow data: {}", e)))?;
+            py.detach(|| builder.push_batch(&batch)).map_err(|e| {
                 PyValueError::new_err(format!("Failed to build network from Arrow data: {}", e))
             })?;
+        }
+        let (network, spatial) = py.detach(|| builder.finish());
 
         Ok(PyRoadNetwork {
             network: Arc::new(network),
