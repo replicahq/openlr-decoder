@@ -143,34 +143,77 @@ fn build_network_from_batches_with_hint<I>(
 where
     I: Iterator<Item = Result<RecordBatch>>,
 {
-    // Estimate node count as ~edge count (road networks have roughly equal nodes and edges)
-    let node_hint = edge_count_hint;
-
-    let mut network = if edge_count_hint > 0 {
-        RoadNetwork::new_with_capacity(node_hint, edge_count_hint)
-    } else {
-        RoadNetwork::new()
-    };
-
-    let mut edge_envelopes: Vec<EdgeEnvelope> = Vec::with_capacity(edge_count_hint);
-
-    // Track nodes we've seen to avoid duplicates
-    let mut seen_nodes: AHashMap<i64, Point<f64>> = AHashMap::with_capacity(node_hint);
+    let mut builder = NetworkBuilder::with_capacity(edge_count_hint);
 
     for batch_result in batches {
         let batch = batch_result?;
-        process_batch(&batch, &mut network, &mut edge_envelopes, &mut seen_nodes)?;
+        builder.push_batch(&batch)?;
     }
 
-    // Explicitly drop seen_nodes before R-tree bulk_load to reduce peak memory
-    drop(seen_nodes);
+    Ok(builder.finish())
+}
 
-    let spatial_index = SpatialIndex::new(edge_envelopes);
+/// Incremental road network builder.
+///
+/// Equivalent to [`build_network_from_batches`], but lets the caller drive the
+/// loop one batch at a time. This matters for the Python bindings, which pull
+/// each batch from an Arrow stream with the GIL held and then release it to do
+/// the actual work — so a batch can be dropped before the next one is fetched
+/// instead of holding the whole stream in memory.
+pub struct NetworkBuilder {
+    network: RoadNetwork,
+    edge_envelopes: Vec<EdgeEnvelope>,
+    /// Nodes we've seen, to avoid duplicates.
+    seen_nodes: AHashMap<i64, Point<f64>>,
+}
 
-    // Drop the ID-to-index lookup maps; they are only needed during construction.
-    network.compact();
+impl NetworkBuilder {
+    /// Create a builder, pre-allocating for `edge_count_hint` edges (pass 0 if unknown).
+    pub fn with_capacity(edge_count_hint: usize) -> Self {
+        // Estimate node count as ~edge count (road networks have roughly equal nodes and edges)
+        let node_hint = edge_count_hint;
 
-    Ok((network, spatial_index))
+        let network = if edge_count_hint > 0 {
+            RoadNetwork::new_with_capacity(node_hint, edge_count_hint)
+        } else {
+            RoadNetwork::new()
+        };
+
+        NetworkBuilder {
+            network,
+            edge_envelopes: Vec::with_capacity(edge_count_hint),
+            seen_nodes: AHashMap::with_capacity(node_hint),
+        }
+    }
+
+    /// Add one batch of edges to the network.
+    pub fn push_batch(&mut self, batch: &RecordBatch) -> Result<()> {
+        process_batch(
+            batch,
+            &mut self.network,
+            &mut self.edge_envelopes,
+            &mut self.seen_nodes,
+        )
+    }
+
+    /// Consume the builder and produce the network and its spatial index.
+    pub fn finish(mut self) -> (RoadNetwork, SpatialIndex) {
+        // Explicitly drop seen_nodes before R-tree bulk_load to reduce peak memory
+        drop(self.seen_nodes);
+
+        let spatial_index = SpatialIndex::new(self.edge_envelopes);
+
+        // Drop the ID-to-index lookup maps; they are only needed during construction.
+        self.network.compact();
+
+        (self.network, spatial_index)
+    }
+}
+
+impl Default for NetworkBuilder {
+    fn default() -> Self {
+        Self::with_capacity(0)
+    }
 }
 
 /// Represents a fully-processed edge ready to insert into the graph.
