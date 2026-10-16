@@ -248,6 +248,10 @@ struct PathResult {
     edges: Vec<EdgeIndex>,
     coverages: Vec<EdgeCoverage>,
     total_length: f64,
+    /// Distance from the start of `edges[0]` to the first LRP's projection (meters)
+    start_offset_m: f64,
+    /// Distance from the second LRP's projection to the end of the last edge (meters)
+    end_offset_m: f64,
 }
 
 /// Length bookkeeping for one LRP-to-LRP segment, used to bound terminal snaps.
@@ -257,6 +261,10 @@ struct SegmentInfo {
     length_m: f64,
     /// Encoded DNP for the segment (meters)
     expected_m: f64,
+    /// `PathResult::start_offset_m` of the segment
+    start_offset_m: f64,
+    /// `PathResult::end_offset_m` of the segment
+    end_offset_m: f64,
 }
 
 /// Offsets computed for a finalized path.
@@ -418,9 +426,11 @@ impl<'a> Decoder<'a> {
     /// Compute LRP-projection offsets for `path`, then snap its ends to valid nodes.
     ///
     /// Spec deviation: OpenLR Section 12.10 says offsets come from the binary-encoded
-    /// fractions, but HERE data always encodes them as 0. Instead we project the LRP
-    /// coordinates onto the first/last edges in our network, giving edge-relative
-    /// offsets that are meaningful for consumers working with OSM edges.
+    /// fractions, but HERE data always encodes them as 0. Instead the offsets are the
+    /// first/last LRP's projection onto the first/last edges in our network (as
+    /// measured during path finding and passed in `first_segment`/`last_segment`),
+    /// giving edge-relative offsets that are meaningful for consumers working with
+    /// OSM edges.
     ///
     /// If `snap_to_valid_nodes` is enabled and a terminal edge ends on an invalid
     /// node (Rule 4), the path is extended along the forced continuation to the first
@@ -436,30 +446,16 @@ impl<'a> Decoder<'a> {
         first_segment: SegmentInfo,
         last_segment: SegmentInfo,
     ) -> PathOffsets {
-        let (Some(&first_edge_idx), Some(&last_edge_idx)) = (path.first(), path.last()) else {
+        if path.is_empty() {
             return PathOffsets::default();
-        };
+        }
 
-        let mut positive_offset_m = self
-            .network
-            .edge(first_edge_idx)
-            .map(|e| {
-                e.length_m
-                    * crate::spatial::project_point_to_line_fraction(first_lrp_coord, &e.geometry)
-            })
-            .unwrap_or(0.0);
-        let mut negative_offset_m = self
-            .network
-            .edge(last_edge_idx)
-            .map(|e| {
-                e.length_m
-                    * (1.0
-                        - crate::spatial::project_point_to_line_fraction(
-                            last_lrp_coord,
-                            &e.geometry,
-                        ))
-            })
-            .unwrap_or(0.0);
+        // Use the offsets path finding measured against the edges it kept. Don't
+        // re-project the LRPs onto `path`'s ends: when a terminal edge was dropped
+        // as negligible, the LRP lies beyond the new terminal edge and its projection
+        // clamps to the wrong end of it, so the offsets could meet or cross.
+        let mut positive_offset_m = first_segment.start_offset_m;
+        let mut negative_offset_m = last_segment.end_offset_m;
 
         // Guard against topology asymmetry (HERE has a junction our OSM car graph
         // lacks, so a real LRP node looks like a through-node to us): only extend if
@@ -650,6 +646,8 @@ impl<'a> Decoder<'a> {
             let seg = SegmentInfo {
                 length_m: path_result.total_length,
                 expected_m: expected_distance,
+                start_offset_m: path_result.start_offset_m,
+                end_offset_m: path_result.end_offset_m,
             };
             if i == 0 {
                 first_segment = seg;
@@ -828,6 +826,8 @@ impl<'a> Decoder<'a> {
         let seg = SegmentInfo {
             length_m: path_result.total_length,
             expected_m: expected_distance,
+            start_offset_m: path_result.start_offset_m,
+            end_offset_m: path_result.end_offset_m,
         };
         let offsets = self.finalize_path(&mut full_path, first_lrp_coord, last_lrp_coord, seg, seg);
 
@@ -861,7 +861,8 @@ impl<'a> Decoder<'a> {
         // Only consider candidates with good spatial match (within 10m)
         const MAX_PROJECTION_DISTANCE: f64 = 10.0;
 
-        let mut best_same_edge: Option<(EdgeIndex, f64, f64)> = None; // (edge_idx, length, score)
+        // (edge_idx, length, start_offset_m, end_offset_m, score)
+        let mut best_same_edge: Option<(EdgeIndex, f64, f64, f64, f64)> = None;
 
         for start_cand in start_candidates.iter().take(10) {
             if start_cand.distance_m > MAX_PROJECTION_DISTANCE {
@@ -917,13 +918,19 @@ impl<'a> Decoder<'a> {
                 let score = start_cand.score + end_cand.score + length_diff;
 
                 // Track the best same-edge solution
-                if best_same_edge.is_none() || score < best_same_edge.as_ref().unwrap().2 {
-                    best_same_edge = Some((start_cand.edge_idx, path_cost, score));
+                if best_same_edge.is_none() || score < best_same_edge.as_ref().unwrap().4 {
+                    best_same_edge = Some((
+                        start_cand.edge_idx,
+                        path_cost,
+                        edge.length_m * start_cand.projection_fraction,
+                        edge.length_m * (1.0 - end_cand.projection_fraction),
+                        score,
+                    ));
                 }
             }
         }
 
-        best_same_edge.map(|(edge_idx, length, score)| {
+        best_same_edge.map(|(edge_idx, length, start_offset_m, end_offset_m, score)| {
             (
                 PathResult {
                     edges: vec![edge_idx],
@@ -932,6 +939,8 @@ impl<'a> Decoder<'a> {
                         coverage_m: length,
                     }],
                     total_length: length,
+                    start_offset_m,
+                    end_offset_m,
                 },
                 score,
             )
@@ -1075,6 +1084,9 @@ impl<'a> Decoder<'a> {
                                         coverage_m: path_cost,
                                     }],
                                     total_length: path_cost,
+                                    start_offset_m: edge.length_m * start_cand.projection_fraction,
+                                    end_offset_m: edge.length_m
+                                        * (1.0 - end_cand.projection_fraction),
                                 });
 
                                 if length_diff < 0.1 {
@@ -1153,8 +1165,14 @@ impl<'a> Decoder<'a> {
             const MIN_EDGE_CONTRIBUTION: f64 = 0.03; // 3% of path length
             let mut edges = Vec::new();
             let mut coverages = Vec::new();
+            // Offsets are relative to the first/last edge actually kept: if a
+            // terminal edge is dropped, the path starts (ends) at its target
+            // (source) node, i.e. at offset 0 on the next edge in.
+            let mut start_offset_m = 0.0;
+            let mut end_offset_m = 0.0;
 
             if start_edge_partial / path_cost >= MIN_EDGE_CONTRIBUTION {
+                start_offset_m = start_edge.length_m * start_cand.projection_fraction;
                 edges.push(start_cand.edge_idx);
                 coverages.push(EdgeCoverage {
                     edge_idx: start_cand.edge_idx,
@@ -1176,6 +1194,7 @@ impl<'a> Decoder<'a> {
             if end_cand.edge_idx != start_cand.edge_idx
                 && end_edge_partial / path_cost >= MIN_EDGE_CONTRIBUTION
             {
+                end_offset_m = end_edge.length_m * (1.0 - end_cand.projection_fraction);
                 edges.push(end_cand.edge_idx);
                 coverages.push(EdgeCoverage {
                     edge_idx: end_cand.edge_idx,
@@ -1193,6 +1212,8 @@ impl<'a> Decoder<'a> {
                     edges,
                     coverages,
                     total_length: path_cost,
+                    start_offset_m,
+                    end_offset_m,
                 });
 
                 // Early termination: if we found a good match, stop searching
@@ -1223,6 +1244,63 @@ mod tests {
     fn test_decoder_config_defaults() {
         let config = DecoderConfig::default();
         assert_eq!(config.length_tolerance, 0.35);
+    }
+
+    /// Path finding reports offsets relative to the terminal edges it keeps: a
+    /// dropped (negligible) start/end edge means offset 0 on the next edge in, not
+    /// the LRP's projection onto that edge (which clamps to its far end when the
+    /// LRP lies off the network, so the offsets would meet or cross).
+    #[test]
+    fn test_find_best_path_offsets_follow_kept_terminal_edges() {
+        let (network, spatial) = TestNetworkBuilder::new()
+            .add_node(1, 0.0, 0.0)
+            .add_node(2, 0.0, 0.001)
+            .add_node(3, 0.0, 0.002)
+            .add_node(4, 0.0, 0.003)
+            .add_edge(1, 1, 2, 100.0, Frc::Frc4, Fow::SingleCarriageway)
+            .add_edge(2, 2, 3, 46.0, Frc::Frc4, Fow::SingleCarriageway)
+            .add_edge(3, 3, 4, 100.0, Frc::Frc4, Fow::SingleCarriageway)
+            .build();
+        let decoder = Decoder::new(&network, &spatial);
+        let idx = |id| *network.edge_id_to_index.as_ref().unwrap().get(&id).unwrap();
+        let candidate = |edge_idx, projection_fraction| Candidate {
+            edge_idx,
+            distance_m: 0.0,
+            bearing_diff: 0.0,
+            frc_diff: 0,
+            fow_score: 1.0,
+            score: 0.0,
+            projection_fraction,
+        };
+
+        // Both LRPs project onto the junction ends of e1/e3: those partials are
+        // negligible, so the path is just e2, traversed in full.
+        let result = decoder
+            .find_best_path(
+                &[candidate(idx(1), 0.999)],
+                &[candidate(idx(3), 0.001)],
+                46.0,
+                0,
+                None,
+            )
+            .unwrap();
+        assert_eq!(result.edges, vec![idx(2)]);
+        assert_eq!(result.start_offset_m, 0.0);
+        assert_eq!(result.end_offset_m, 0.0);
+
+        // Kept terminal edges carry their projection offsets.
+        let result = decoder
+            .find_best_path(
+                &[candidate(idx(1), 0.5)],
+                &[candidate(idx(3), 0.25)],
+                121.0,
+                0,
+                None,
+            )
+            .unwrap();
+        assert_eq!(result.edges, vec![idx(1), idx(2), idx(3)]);
+        assert!((result.start_offset_m - 50.0).abs() < 1e-9);
+        assert!((result.end_offset_m - 75.0).abs() < 1e-9);
     }
 
     #[test]
@@ -2079,6 +2157,7 @@ mod tests {
         let seg = SegmentInfo {
             length_m: 200.0,
             expected_m: 200.0,
+            ..SegmentInfo::default()
         };
 
         let offsets = decoder.finalize_path(&mut path, n1, n4, seg, seg);
@@ -2115,6 +2194,7 @@ mod tests {
         let seg = SegmentInfo {
             length_m: 200.0,
             expected_m: 200.0,
+            ..SegmentInfo::default()
         };
 
         let offsets = decoder.finalize_path(&mut path, n1, n4, seg, seg);
@@ -2140,6 +2220,7 @@ mod tests {
         let no_headroom = SegmentInfo {
             length_m: 295.0,
             expected_m: 200.0,
+            ..SegmentInfo::default()
         };
         decoder.finalize_path(&mut path, n1, n4, no_headroom, no_headroom);
         assert_eq!(ids(&network, &path), vec![1, 2]);
@@ -2165,6 +2246,7 @@ mod tests {
         let seg = SegmentInfo {
             length_m: 200.0,
             expected_m: 200.0,
+            ..SegmentInfo::default()
         };
         decoder.finalize_path(&mut path, n1, n4, seg, seg);
         assert_eq!(ids(&network, &path), vec![1, 2]);
@@ -2194,6 +2276,7 @@ mod tests {
         let seg = SegmentInfo {
             length_m: 115.0,
             expected_m: 1500.0,
+            ..SegmentInfo::default()
         };
 
         let offsets = decoder.finalize_path(&mut path, n2, n5, seg, seg);
@@ -2228,6 +2311,7 @@ mod tests {
         let seg = SegmentInfo {
             length_m: 200.0,
             expected_m: 200.0,
+            ..SegmentInfo::default()
         };
         let offsets = decoder.finalize_path(&mut path, n1, n3, seg, seg);
         assert_eq!(ids(&network, &path), vec![1, 2], "LRP at N3: no extension");
@@ -2251,6 +2335,7 @@ mod tests {
         let seg = SegmentInfo {
             length_m: 100.0,
             expected_m: 100.0,
+            ..SegmentInfo::default()
         };
         let offsets = decoder.finalize_path(&mut path, n1, n2, seg, seg);
         assert_eq!(ids(&network, &path), vec![1]);
