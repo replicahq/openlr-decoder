@@ -1,3 +1,4 @@
+pub mod batch;
 pub mod candidates;
 pub mod decoder;
 pub mod graph;
@@ -10,6 +11,7 @@ pub mod test_utils;
 #[cfg(feature = "python")]
 mod python;
 
+pub use batch::{decode_batch, BatchLayout};
 pub use candidates::{find_candidates, Candidate, CandidateConfig};
 pub use decoder::{DecodeError, DecodedPath, Decoder, DecoderConfig};
 pub use graph::{Edge, Fow, Frc, Node, RoadNetwork};

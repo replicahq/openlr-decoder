@@ -80,6 +80,8 @@ batch = decoder.decode_batch(codes)
 
 The returned RecordBatch has the same fields as `DecodedPath` plus an `error` column (null on success, error message on failure).
 
+`decode_batch()` also accepts a Polars `Series` or PyArrow array of strings directly, read zero-copy — prefer that over `.to_list()` for large inputs. Pass `explode=True` to get one row per (code, edge) instead; see the [API reference](api-reference.md#decoderdecode_batchopenlr_codes-explodefalse).
+
 ### Converting Results
 
 === "Polars"

@@ -138,4 +138,5 @@ If this succeeds, gradually tighten parameters to find the right balance.
 - **Use `decode_batch()`** for multiple codes — it parallelizes across all CPU cores and avoids Python overhead per decode
 - **Use `from_arrow()`** with Polars DataFrames for zero-copy network loading (faster than `from_parquet()` if data is already in memory)
 - **Filter your network** to the relevant region before loading — fewer edges means faster spatial queries
-- **Batch size**: `decode_batch()` scales well to hundreds of thousands of codes
+- **Batch size**: `decode_batch()` decodes in chunks and builds its output incrementally, so a single call scales to hundreds of millions of codes; its peak memory is roughly the network plus the output
+- **Pass Arrow, not lists**: give `decode_batch()` a Polars `Series` or PyArrow array — `.to_list()` creates a Python `str` per code — and use `explode=True` instead of exploding `edge_ids` yourself

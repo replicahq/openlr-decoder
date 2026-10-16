@@ -70,7 +70,7 @@ All parameters are readable and writable after construction.
 
 - `Decoder(network: RoadNetwork, config: DecoderConfig | None = None)` — create decoder
 - `decoder.decode(openlr_base64: str) -> DecodedPath` — decode single code, raises ValueError on failure
-- `decoder.decode_batch(openlr_codes: list[str]) -> pyarrow.RecordBatch` — decode in parallel, returns batch with error column
+- `decoder.decode_batch(openlr_codes: list[str] | ArrowStringArray, *, explode: bool = False) -> pyarrow.RecordBatch` — decode in parallel, returns batch with error column. Accepts a list of str or, zero-copy, any Arrow string array (PyArrow Array/ChunkedArray, Polars Series); nulls become errors.
 
 ### DecodedPath
 
@@ -88,6 +88,8 @@ Returned by `decode()`. Properties:
 ### decode_batch() RecordBatch Schema
 
 Columns: edge_ids (list<uint64>), length (float64), positive_offset (float64), negative_offset (float64), positive_offset_fraction (float64), negative_offset_fraction (float64), primary_edge_id (uint64), primary_edge_coverage (float64), error (string, nullable — null on success).
+
+With `explode=True`: one row per (code, edge), plus one row with null edge columns per failed code. Columns: code_index (uint64, position in input), edge_id (uint64), edge_position (uint32, 0-based), is_primary (bool), offset_fraction (float64, 0-1 — fraction of this edge outside the location; meter offsets are spread from each end of the path, so snap-extension edges are 1.0), length (float64), error (string, nullable).
 
 ### road_network_schema()
 
@@ -160,4 +162,4 @@ G = nx.from_pandas_edgelist(df.to_pandas(), source="startVertex", target="endVer
 nx.has_path(G, start_vertex, end_vertex)
 ```
 
-Performance: use decode_batch() for multiple codes, from_arrow() for zero-copy loading, filter network to relevant region.
+Performance: use decode_batch() for multiple codes (pass a Polars Series / PyArrow array rather than a list), from_arrow() for zero-copy loading, filter network to relevant region.

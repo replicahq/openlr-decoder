@@ -163,15 +163,18 @@ except ValueError as e:
     print(f"Decode failed: {e}")
 ```
 
-### `Decoder.decode_batch(openlr_codes)`
+### `Decoder.decode_batch(openlr_codes, *, explode=False)`
 
 Decode multiple OpenLR codes in parallel. Releases the Python GIL during computation.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `openlr_codes` | `list[str]` | List of base64-encoded OpenLR strings |
+| `openlr_codes` | `list[str]` or Arrow string array | Base64-encoded OpenLR strings. Any object exposing the Arrow PyCapsule interface (`__arrow_c_array__` / `__arrow_c_stream__`) with a `string`, `large_string` or `string_view` type is read zero-copy — e.g. a PyArrow `Array`/`ChunkedArray` or a Polars `Series`. Null entries are reported as errors. |
+| `explode` | `bool` | Return one row per (code, edge) instead of one row per code. Default `False`. |
 
-**Returns:** PyArrow `RecordBatch` with columns:
+Codes are decoded in chunks whose results are appended to the output as they finish, so peak memory is roughly the network plus one copy of the output. Prefer passing a Polars `Series` or PyArrow array over `.to_list()`, which materializes a Python `str` per code.
+
+**Returns:** PyArrow `RecordBatch`. With `explode=False`, one row per code:
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -185,12 +188,28 @@ Decode multiple OpenLR codes in parallel. Releases the Python GIL during computa
 | `primary_edge_coverage` | `float64` | Distance covered by primary edge (null on failure) |
 | `error` | `string` | Error message (null on success) |
 
-```python
-batch = decoder.decode_batch(["CwRbWyNG9RpsCQCb/jsboAD/6/+E", ...])
+With `explode=True`, one row per edge of each decoded path, plus a single row with null edge columns for each failed code — every input code appears at least once:
 
-# Convert to Polars
+| Column | Type | Description |
+|--------|------|-------------|
+| `code_index` | `uint64` | Position of the code in `openlr_codes` |
+| `edge_id` | `uint64` | Edge ID (null on failure) |
+| `edge_position` | `uint32` | 0-based position of the edge in the path (null on failure) |
+| `is_primary` | `bool` | Whether this edge is the path's `primary_edge_id` (null on failure) |
+| `offset_fraction` | `float64` | Fraction (0-1) of this edge outside the location, i.e. trimmed off by `positive_offset`/`negative_offset`. Offsets are spread from each end of the path, so after a terminal-node snap the extension edges are `1.0` and the next edge in gets the remainder; a single-edge path gets both offsets; `0.0` for edges fully inside (null on failure) |
+| `length` | `float64` | Path length in meters (null on failure) |
+| `error` | `string` | Error message (null on success) |
+
+```python
 import polars as pl
+
+codes = pl.Series(["CwRbWyNG9RpsCQCb/jsboAD/6/+E", ...])
+batch = decoder.decode_batch(codes)
 df = pl.from_arrow(batch)
+
+# One row per matched edge, joined back to the input codes
+edges = pl.from_arrow(decoder.decode_batch(codes, explode=True))
+edges = edges.with_columns(openlr_code=codes.gather(edges["code_index"]))
 ```
 
 ---

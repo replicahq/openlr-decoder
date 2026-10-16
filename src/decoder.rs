@@ -214,6 +214,8 @@ pub enum DecodeError {
 pub struct DecodedPath {
     /// Sequence of stable edge IDs forming the path
     pub edge_ids: Vec<u64>,
+    /// Length in meters of each edge in `edge_ids` (same order)
+    pub edge_lengths_m: Vec<f64>,
     /// Total path length in meters
     pub length_m: f64,
     /// Distance from start of first edge to first LRP projection (trim from start) in meters
@@ -508,12 +510,12 @@ impl<'a> Decoder<'a> {
         }
     }
 
-    /// Convert edge indices to stable edge IDs
-    fn edge_indices_to_ids(&self, indices: &[EdgeIndex]) -> Vec<u64> {
+    /// Convert edge indices to stable edge IDs and their lengths
+    fn edge_ids_and_lengths(&self, indices: &[EdgeIndex]) -> (Vec<u64>, Vec<f64>) {
         indices
             .iter()
-            .filter_map(|&idx| self.network.edge(idx).map(|e| e.id))
-            .collect()
+            .filter_map(|&idx| self.network.edge(idx).map(|e| (e.id, e.length_m)))
+            .unzip()
     }
 
     /// Decode an OpenLR base64 string to a path
@@ -613,8 +615,9 @@ impl<'a> Decoder<'a> {
         // Build path between consecutive LRPs
         let mut full_path: Vec<EdgeIndex> = Vec::new();
         let mut total_length = 0.0;
-        // Track coverage per edge (edge may appear multiple times, so we aggregate)
-        let mut edge_coverage_map: HashMap<EdgeIndex, f64> = HashMap::new();
+        // Track coverage per edge (edge may appear multiple times, so we aggregate),
+        // in first-traversal order so primary-edge ties resolve deterministically.
+        let mut edge_coverages: Vec<(EdgeIndex, f64)> = Vec::new();
         // (path length, expected DNP) of the first and last LRP segments, used to
         // bound the terminal-node snap.
         let mut first_segment = SegmentInfo::default();
@@ -655,7 +658,13 @@ impl<'a> Decoder<'a> {
 
             // Accumulate edge coverages (aggregate if edge appears multiple times)
             for coverage in &path_result.coverages {
-                *edge_coverage_map.entry(coverage.edge_idx).or_insert(0.0) += coverage.coverage_m;
+                match edge_coverages
+                    .iter_mut()
+                    .find(|(idx, _)| *idx == coverage.edge_idx)
+                {
+                    Some((_, total)) => *total += coverage.coverage_m,
+                    None => edge_coverages.push((coverage.edge_idx, coverage.coverage_m)),
+                }
             }
 
             // Add edges to full path (avoid duplicating junction edges)
@@ -670,11 +679,12 @@ impl<'a> Decoder<'a> {
             }
         }
 
-        // Find the primary edge (the one with maximum coverage)
-        let (primary_edge_idx, primary_coverage) = edge_coverage_map
+        // Find the primary edge (the one with maximum coverage; ties go to the
+        // earliest edge in the path)
+        let (primary_edge_idx, primary_coverage) = edge_coverages
             .iter()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-            .map(|(&idx, &cov)| (idx, cov))
+            .copied()
+            .reduce(|best, c| if c.1 > best.1 { c } else { best })
             .unwrap_or_else(|| (full_path.first().copied().unwrap_or(EdgeIndex::new(0)), 0.0));
 
         let primary_edge_id = self
@@ -696,8 +706,10 @@ impl<'a> Decoder<'a> {
             last_segment,
         );
 
+        let (edge_ids, edge_lengths_m) = self.edge_ids_and_lengths(&full_path);
         Ok(DecodedPath {
-            edge_ids: self.edge_indices_to_ids(&full_path),
+            edge_ids,
+            edge_lengths_m,
             length_m: total_length,
             positive_offset_m: offsets.positive_offset_m,
             negative_offset_m: offsets.negative_offset_m,
@@ -819,8 +831,10 @@ impl<'a> Decoder<'a> {
         };
         let offsets = self.finalize_path(&mut full_path, first_lrp_coord, last_lrp_coord, seg, seg);
 
+        let (edge_ids, edge_lengths_m) = self.edge_ids_and_lengths(&full_path);
         Ok(DecodedPath {
-            edge_ids: self.edge_indices_to_ids(&full_path),
+            edge_ids,
+            edge_lengths_m,
             length_m: path_result.total_length,
             positive_offset_m: offsets.positive_offset_m,
             negative_offset_m: offsets.negative_offset_m,
