@@ -3,16 +3,16 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, Float64Builder, ListBuilder, StringBuilder, UInt64Builder};
-use arrow::record_batch::RecordBatch;
-use pyo3::exceptions::PyValueError;
+use arrow::array::{Array, AsArray};
+use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::Py;
+use pyo3_arrow::input::AnyArray;
 use pyo3_arrow::{PyRecordBatch, PyRecordBatchReader, PySchema};
-use rayon::prelude::*;
 
+use crate::batch::{self, decode_error_message, BatchLayout};
 use crate::candidates::CandidateConfig;
-use crate::decoder::{DecodeError, DecodedPath, Decoder, DecoderConfig};
+use crate::decoder::{DecodedPath, Decoder, DecoderConfig};
 use crate::graph::RoadNetwork;
 use crate::loader::{load_network_from_parquet, NetworkBuilder};
 use crate::spatial::SpatialIndex;
@@ -396,10 +396,17 @@ impl PyDecoder {
     /// Decode multiple OpenLR strings in parallel
     ///
     /// Args:
-    ///     openlr_codes: List of base64-encoded OpenLR location references
+    ///     openlr_codes: base64-encoded OpenLR location references, either as a
+    ///         list of str or as any Arrow string array (``string``,
+    ///         ``large_string`` or ``string_view``) exposed through the Arrow
+    ///         PyCapsule interface — a PyArrow ``Array``/``ChunkedArray`` or a
+    ///         Polars ``Series``. Arrow input is read zero-copy; null entries
+    ///         are reported as errors.
+    ///     explode: if True, return one row per (code, edge) instead of one row
+    ///         per code (see below).
     ///
     /// Returns:
-    ///     PyArrow RecordBatch with columns:
+    ///     PyArrow RecordBatch. With ``explode=False`` (default), one row per code:
     ///     - edge_ids: list<uint64> - edge IDs for each decoded path
     ///     - length: float64 - path length in meters
     ///     - positive_offset: float64 - distance from first edge start to first LRP projection (meters)
@@ -409,88 +416,59 @@ impl PyDecoder {
     ///     - primary_edge_id: uint64 - edge ID covering the most distance
     ///     - primary_edge_coverage: float64 - distance covered by primary edge in meters
     ///     - error: string (nullable) - error message if decode failed, null if succeeded
-    fn decode_batch(&self, py: Python<'_>, openlr_codes: Vec<String>) -> PyResult<Py<PyAny>> {
-        let network = &self.network;
-        let spatial = &self.spatial;
-        let config = &self.config;
+    ///
+    ///     With ``explode=True``, one row per edge of each decoded path, and a
+    ///     single row with null edge columns for each failed code:
+    ///     - code_index: uint64 - position of the code in ``openlr_codes``
+    ///     - edge_id: uint64 - edge ID
+    ///     - edge_position: uint32 - 0-based position of the edge in the path
+    ///     - is_primary: bool - whether this is the path's primary edge
+    ///     - offset_fraction: float64 - fraction of this edge trimmed by the path
+    ///       offsets (positive_offset_fraction on the first edge,
+    ///       negative_offset_fraction on the last, their sum on a single-edge
+    ///       path, 0.0 in between)
+    ///     - length: float64 - path length in meters
+    ///     - error: string (nullable) - error message if decode failed
+    #[pyo3(signature = (openlr_codes, *, explode = false))]
+    fn decode_batch(
+        &self,
+        py: Python<'_>,
+        openlr_codes: CodesInput,
+        explode: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let layout = if explode {
+            BatchLayout::Exploded
+        } else {
+            BatchLayout::Nested
+        };
+        let decoder = Decoder::new(&self.network, &self.spatial).with_config(self.config.clone());
 
-        // Decode in parallel, releasing the GIL
-        let results: Vec<Result<DecodedPath, DecodeError>> = py.detach(|| {
-            openlr_codes
-                .par_iter()
-                .map(|code| {
-                    let decoder = Decoder::new(network, spatial).with_config(config.clone());
-                    decoder.decode(code)
+        // Decoding and Arrow building touch no Python objects, so release the GIL.
+        let batch = match openlr_codes {
+            CodesInput::List(codes) => {
+                let n = codes.len();
+                py.detach(|| {
+                    batch::decode_batch(&decoder, codes.iter().map(|c| Some(c.as_str())), layout, n)
                 })
-                .collect()
-        });
-
-        // Build Arrow arrays from results
-        let mut edge_ids_builder = ListBuilder::new(UInt64Builder::new());
-        let mut length_builder = Float64Builder::new();
-        let mut pos_offset_builder = Float64Builder::new();
-        let mut neg_offset_builder = Float64Builder::new();
-        let mut pos_offset_frac_builder = Float64Builder::new();
-        let mut neg_offset_frac_builder = Float64Builder::new();
-        let mut primary_edge_id_builder = UInt64Builder::new();
-        let mut primary_edge_coverage_builder = Float64Builder::new();
-        let mut error_builder = StringBuilder::new();
-
-        for result in results {
-            match result {
-                Ok(path) => {
-                    // Append edge IDs list
-                    let values = edge_ids_builder.values();
-                    for &id in &path.edge_ids {
-                        values.append_value(id);
-                    }
-                    edge_ids_builder.append(true);
-
-                    length_builder.append_value(path.length_m);
-                    pos_offset_builder.append_value(path.positive_offset_m);
-                    neg_offset_builder.append_value(path.negative_offset_m);
-                    pos_offset_frac_builder.append_value(path.positive_offset_fraction);
-                    neg_offset_frac_builder.append_value(path.negative_offset_fraction);
-                    primary_edge_id_builder.append_value(path.primary_edge_id);
-                    primary_edge_coverage_builder.append_value(path.primary_edge_coverage_m);
-                    error_builder.append_null();
-                }
-                Err(e) => {
-                    // Empty list for failed decodes
-                    edge_ids_builder.append(true);
-                    length_builder.append_null();
-                    pos_offset_builder.append_null();
-                    neg_offset_builder.append_null();
-                    pos_offset_frac_builder.append_null();
-                    neg_offset_frac_builder.append_null();
-                    primary_edge_id_builder.append_null();
-                    primary_edge_coverage_builder.append_null();
-                    error_builder.append_value(decode_error_message(e));
-                }
+            }
+            CodesInput::Arrow(input) => {
+                // Pull the chunks with the GIL held (the stream may be produced in
+                // Python); importing them is zero-copy.
+                let chunks = input
+                    .into_chunked_array()
+                    .map_err(|e| {
+                        PyValueError::new_err(format!("Failed to read Arrow data: {}", e))
+                    })?
+                    .into_inner()
+                    .0;
+                let n = chunks.iter().map(|c| c.len()).sum();
+                let codes = chunks
+                    .iter()
+                    .map(|c| string_values(c.as_ref()))
+                    .collect::<PyResult<Vec<_>>>()?;
+                py.detach(|| batch::decode_batch(&decoder, codes.into_iter().flatten(), layout, n))
             }
         }
-
-        let edge_ids: ArrayRef = Arc::new(edge_ids_builder.finish());
-        let length: ArrayRef = Arc::new(length_builder.finish());
-        let positive_offset: ArrayRef = Arc::new(pos_offset_builder.finish());
-        let negative_offset: ArrayRef = Arc::new(neg_offset_builder.finish());
-        let positive_offset_fraction: ArrayRef = Arc::new(pos_offset_frac_builder.finish());
-        let negative_offset_fraction: ArrayRef = Arc::new(neg_offset_frac_builder.finish());
-        let primary_edge_id: ArrayRef = Arc::new(primary_edge_id_builder.finish());
-        let primary_edge_coverage: ArrayRef = Arc::new(primary_edge_coverage_builder.finish());
-        let error: ArrayRef = Arc::new(error_builder.finish());
-
-        let batch = RecordBatch::try_from_iter(vec![
-            ("edge_ids", edge_ids),
-            ("length", length),
-            ("positive_offset", positive_offset),
-            ("negative_offset", negative_offset),
-            ("positive_offset_fraction", positive_offset_fraction),
-            ("negative_offset_fraction", negative_offset_fraction),
-            ("primary_edge_id", primary_edge_id),
-            ("primary_edge_coverage", primary_edge_coverage),
-            ("error", error),
-        ])
         .map_err(|e| PyValueError::new_err(format!("Failed to create RecordBatch: {}", e)))?;
 
         // Convert to PyArrow via pyo3-arrow
@@ -498,6 +476,33 @@ impl PyDecoder {
             .into_pyarrow(py)
             .map(|b| b.unbind())
             .map_err(|e| PyValueError::new_err(format!("Failed to convert to PyArrow: {}", e)))
+    }
+}
+
+/// OpenLR codes accepted by `Decoder.decode_batch`.
+#[derive(FromPyObject)]
+enum CodesInput {
+    /// Anything exposing `__arrow_c_array__` or `__arrow_c_stream__`.
+    Arrow(AnyArray),
+    /// A Python sequence of str (copied).
+    List(Vec<String>),
+}
+
+type StrIter<'a> = Box<dyn Iterator<Item = Option<&'a str>> + Send + 'a>;
+
+/// Iterate the values of an Arrow string array of any offset width.
+fn string_values(array: &dyn Array) -> PyResult<StrIter<'_>> {
+    if let Some(a) = array.as_string_opt::<i32>() {
+        Ok(Box::new(a.iter()))
+    } else if let Some(a) = array.as_string_opt::<i64>() {
+        Ok(Box::new(a.iter()))
+    } else if let Some(a) = array.as_string_view_opt() {
+        Ok(Box::new(a.iter()))
+    } else {
+        Err(PyTypeError::new_err(format!(
+            "openlr_codes must be a string array, got {}",
+            array.data_type()
+        )))
     }
 }
 
@@ -509,31 +514,6 @@ fn road_network_schema(py: Python<'_>) -> PyResult<Py<PyAny>> {
         .into_pyarrow(py)
         .map(|b| b.unbind())
         .map_err(|e| PyValueError::new_err(format!("Failed to convert schema: {}", e)))
-}
-
-/// Convert decode error to a user-friendly message
-fn decode_error_message(err: DecodeError) -> String {
-    match err {
-        DecodeError::Deserialize(msg) => format!("Invalid OpenLR: {}", msg),
-        DecodeError::NoCandidates { index } => {
-            format!(
-                "No matching roads found for location reference point {}",
-                index
-            )
-        }
-        DecodeError::NoPath { from, to } => {
-            format!("No valid path found between points {} and {}", from, to)
-        }
-        DecodeError::LengthMismatch { expected, actual } => {
-            format!(
-                "Path length mismatch: expected {:.0}m, got {:.0}m",
-                expected, actual
-            )
-        }
-        DecodeError::UnsupportedType(typ) => {
-            format!("Unsupported location type: {}", typ)
-        }
-    }
 }
 
 /// Python module for openlr_decoder

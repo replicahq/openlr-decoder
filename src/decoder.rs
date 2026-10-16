@@ -613,8 +613,9 @@ impl<'a> Decoder<'a> {
         // Build path between consecutive LRPs
         let mut full_path: Vec<EdgeIndex> = Vec::new();
         let mut total_length = 0.0;
-        // Track coverage per edge (edge may appear multiple times, so we aggregate)
-        let mut edge_coverage_map: HashMap<EdgeIndex, f64> = HashMap::new();
+        // Track coverage per edge (edge may appear multiple times, so we aggregate),
+        // in first-traversal order so primary-edge ties resolve deterministically.
+        let mut edge_coverages: Vec<(EdgeIndex, f64)> = Vec::new();
         // (path length, expected DNP) of the first and last LRP segments, used to
         // bound the terminal-node snap.
         let mut first_segment = SegmentInfo::default();
@@ -655,7 +656,13 @@ impl<'a> Decoder<'a> {
 
             // Accumulate edge coverages (aggregate if edge appears multiple times)
             for coverage in &path_result.coverages {
-                *edge_coverage_map.entry(coverage.edge_idx).or_insert(0.0) += coverage.coverage_m;
+                match edge_coverages
+                    .iter_mut()
+                    .find(|(idx, _)| *idx == coverage.edge_idx)
+                {
+                    Some((_, total)) => *total += coverage.coverage_m,
+                    None => edge_coverages.push((coverage.edge_idx, coverage.coverage_m)),
+                }
             }
 
             // Add edges to full path (avoid duplicating junction edges)
@@ -670,11 +677,12 @@ impl<'a> Decoder<'a> {
             }
         }
 
-        // Find the primary edge (the one with maximum coverage)
-        let (primary_edge_idx, primary_coverage) = edge_coverage_map
+        // Find the primary edge (the one with maximum coverage; ties go to the
+        // earliest edge in the path)
+        let (primary_edge_idx, primary_coverage) = edge_coverages
             .iter()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-            .map(|(&idx, &cov)| (idx, cov))
+            .copied()
+            .reduce(|best, c| if c.1 > best.1 { c } else { best })
             .unwrap_or_else(|| (full_path.first().copied().unwrap_or(EdgeIndex::new(0)), 0.0));
 
         let primary_edge_id = self
