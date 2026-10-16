@@ -423,10 +423,9 @@ impl PyDecoder {
     ///     - edge_id: uint64 - edge ID
     ///     - edge_position: uint32 - 0-based position of the edge in the path
     ///     - is_primary: bool - whether this is the path's primary edge
-    ///     - offset_fraction: float64 - fraction of this edge trimmed by the path
-    ///       offsets (positive_offset_fraction on the first edge,
-    ///       negative_offset_fraction on the last, their sum on a single-edge
-    ///       path, 0.0 in between)
+    ///     - offset_fraction: float64 - fraction (0-1) of this edge outside the
+    ///       location; the meter offsets are spread from each end of the path,
+    ///       so edges added by a terminal-node snap are 1.0
     ///     - length: float64 - path length in meters
     ///     - error: string (nullable) - error message if decode failed
     #[pyo3(signature = (openlr_codes, *, explode = false))]

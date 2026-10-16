@@ -214,6 +214,8 @@ pub enum DecodeError {
 pub struct DecodedPath {
     /// Sequence of stable edge IDs forming the path
     pub edge_ids: Vec<u64>,
+    /// Length in meters of each edge in `edge_ids` (same order)
+    pub edge_lengths_m: Vec<f64>,
     /// Total path length in meters
     pub length_m: f64,
     /// Distance from start of first edge to first LRP projection (trim from start) in meters
@@ -508,12 +510,12 @@ impl<'a> Decoder<'a> {
         }
     }
 
-    /// Convert edge indices to stable edge IDs
-    fn edge_indices_to_ids(&self, indices: &[EdgeIndex]) -> Vec<u64> {
+    /// Convert edge indices to stable edge IDs and their lengths
+    fn edge_ids_and_lengths(&self, indices: &[EdgeIndex]) -> (Vec<u64>, Vec<f64>) {
         indices
             .iter()
-            .filter_map(|&idx| self.network.edge(idx).map(|e| e.id))
-            .collect()
+            .filter_map(|&idx| self.network.edge(idx).map(|e| (e.id, e.length_m)))
+            .unzip()
     }
 
     /// Decode an OpenLR base64 string to a path
@@ -704,8 +706,10 @@ impl<'a> Decoder<'a> {
             last_segment,
         );
 
+        let (edge_ids, edge_lengths_m) = self.edge_ids_and_lengths(&full_path);
         Ok(DecodedPath {
-            edge_ids: self.edge_indices_to_ids(&full_path),
+            edge_ids,
+            edge_lengths_m,
             length_m: total_length,
             positive_offset_m: offsets.positive_offset_m,
             negative_offset_m: offsets.negative_offset_m,
@@ -827,8 +831,10 @@ impl<'a> Decoder<'a> {
         };
         let offsets = self.finalize_path(&mut full_path, first_lrp_coord, last_lrp_coord, seg, seg);
 
+        let (edge_ids, edge_lengths_m) = self.edge_ids_and_lengths(&full_path);
         Ok(DecodedPath {
-            edge_ids: self.edge_indices_to_ids(&full_path),
+            edge_ids,
+            edge_lengths_m,
             length_m: path_result.total_length,
             positive_offset_m: offsets.positive_offset_m,
             negative_offset_m: offsets.negative_offset_m,

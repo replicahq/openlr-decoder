@@ -239,17 +239,10 @@ impl Sink for ExplodedSink {
             return self.push_edgeless(code_index, Some(path.length_m), None);
         }
 
-        let last = path.edge_ids.len() - 1;
-        for (position, &edge_id) in path.edge_ids.iter().enumerate() {
-            // Fraction of this edge trimmed off by the path offsets.
-            let mut offset_fraction = 0.0;
-            if position == 0 {
-                offset_fraction += path.positive_offset_fraction;
-            }
-            if position == last {
-                offset_fraction += path.negative_offset_fraction;
-            }
-
+        let offset_fractions = edge_offset_fractions(&path);
+        for (position, (&edge_id, offset_fraction)) in
+            path.edge_ids.iter().zip(offset_fractions).enumerate()
+        {
             self.code_index.append_value(code_index);
             self.edge_id.append_value(edge_id);
             self.edge_position.append_value(position as u32);
@@ -274,20 +267,63 @@ impl Sink for ExplodedSink {
     }
 }
 
+/// Fraction (0-1) of each edge in `path` that lies outside the location.
+///
+/// Each meter offset is consumed edge by edge from its end of the path, so an
+/// offset that spans several edges (after a terminal-node snap) trims all of them,
+/// not just the first/last.
+fn edge_offset_fractions(path: &DecodedPath) -> Vec<f64> {
+    fn trim<'a>(offset_m: f64, edges: impl Iterator<Item = (&'a mut f64, &'a f64)>) {
+        let mut remaining = offset_m;
+        for (trimmed, &length) in edges {
+            if remaining <= 0.0 {
+                break;
+            }
+            let take = remaining.min(length);
+            *trimmed += take;
+            remaining -= take;
+        }
+    }
+
+    let lengths = &path.edge_lengths_m;
+    let mut trimmed_m = vec![0.0; lengths.len()];
+    trim(
+        path.positive_offset_m,
+        trimmed_m.iter_mut().zip(lengths.iter()),
+    );
+    trim(
+        path.negative_offset_m,
+        trimmed_m.iter_mut().zip(lengths.iter()).rev(),
+    );
+    trimmed_m
+        .iter()
+        .zip(lengths)
+        .map(|(&t, &length)| {
+            if length > 0.0 {
+                (t / length).min(1.0)
+            } else {
+                0.0
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use arrow::array::{Array, AsArray};
     use arrow::datatypes::{Float64Type, UInt32Type, UInt64Type};
 
-    fn path(edge_ids: Vec<u64>, primary: u64, pos_frac: f64, neg_frac: f64) -> DecodedPath {
+    fn path(edges: &[(u64, f64)], primary: u64, pos_m: f64, neg_m: f64) -> DecodedPath {
+        let (edge_ids, edge_lengths_m): (Vec<u64>, Vec<f64>) = edges.iter().copied().unzip();
         DecodedPath {
+            positive_offset_fraction: pos_m / edge_lengths_m[0],
+            negative_offset_fraction: neg_m / edge_lengths_m[edge_lengths_m.len() - 1],
             edge_ids,
+            edge_lengths_m,
             length_m: 100.0,
-            positive_offset_m: 1.0,
-            negative_offset_m: 2.0,
-            positive_offset_fraction: pos_frac,
-            negative_offset_fraction: neg_frac,
+            positive_offset_m: pos_m,
+            negative_offset_m: neg_m,
             primary_edge_id: primary,
             primary_edge_coverage_m: 50.0,
         }
@@ -295,9 +331,9 @@ mod tests {
 
     fn outcomes() -> Vec<Outcome> {
         vec![
-            Ok(path(vec![10, 11, 12], 11, 0.25, 0.5)),
+            Ok(path(&[(10, 4.0), (11, 10.0), (12, 4.0)], 11, 1.0, 2.0)),
             Err("boom".to_string()),
-            Ok(path(vec![20], 20, 0.1, 0.2)),
+            Ok(path(&[(20, 10.0)], 20, 1.0, 2.0)),
         ]
     }
 
@@ -369,6 +405,28 @@ mod tests {
         assert_eq!(error.null_count(), 4);
         assert_eq!(error.value(3), "boom");
         assert!(col("length").is_null(3));
+    }
+
+    #[test]
+    fn offsets_spanning_several_edges_trim_each_of_them() {
+        // As after a terminal-node snap: the positive offset covers two whole
+        // prepended edges plus 2 m of the third, the negative offset one whole
+        // appended edge plus 2 m of the one before it.
+        let p = path(
+            &[(1, 5.0), (2, 5.0), (3, 20.0), (4, 5.0), (5, 5.0)],
+            3,
+            12.0,
+            7.0,
+        );
+        let fractions = edge_offset_fractions(&p);
+        let expected = [1.0, 1.0, 0.1, 0.4, 1.0];
+        for (got, want) in fractions.iter().zip(expected) {
+            assert!((got - want).abs() < 1e-12, "{fractions:?}");
+        }
+
+        // Both offsets on one edge add up, capped at the whole edge.
+        let p = path(&[(1, 10.0)], 1, 6.0, 7.0);
+        assert_eq!(edge_offset_fractions(&p), vec![1.0]);
     }
 
     #[test]

@@ -89,7 +89,7 @@ Returned by `decode()`. Properties:
 
 Columns: edge_ids (list<uint64>), length (float64), positive_offset (float64), negative_offset (float64), positive_offset_fraction (float64), negative_offset_fraction (float64), primary_edge_id (uint64), primary_edge_coverage (float64), error (string, nullable — null on success).
 
-With `explode=True`: one row per (code, edge), plus one row with null edge columns per failed code. Columns: code_index (uint64, position in input), edge_id (uint64), edge_position (uint32, 0-based), is_primary (bool), offset_fraction (float64 — positive_offset_fraction on first edge, negative_offset_fraction on last, their sum for a single-edge path, 0 otherwise), length (float64), error (string, nullable).
+With `explode=True`: one row per (code, edge), plus one row with null edge columns per failed code. Columns: code_index (uint64, position in input), edge_id (uint64), edge_position (uint32, 0-based), is_primary (bool), offset_fraction (float64, 0-1 — fraction of this edge outside the location; meter offsets are spread from each end of the path, so snap-extension edges are 1.0), length (float64), error (string, nullable).
 
 ### road_network_schema()
 
