@@ -21,8 +21,8 @@ use crate::spatial::{EdgeEnvelope, SpatialIndex};
 use geo::{LineString, Point};
 use std::collections::HashMap;
 
-/// Network builder with caller-chosen node and edge ids. Every edge gets a
-/// straight two-point geometry between its nodes.
+/// Network builder with caller-chosen node and edge ids. Edges get a straight
+/// geometry between their nodes unless added with [`Self::add_edge_via`].
 pub struct TestNetworkBuilder {
     nodes: HashMap<i64, (f64, f64)>, // id -> (lat, lon)
     edges: Vec<PendingEdge>,
@@ -32,6 +32,7 @@ struct PendingEdge {
     id: u64,
     start_node: i64,
     end_node: i64,
+    via: Vec<(f64, f64)>,  // (lat, lon) shape points between the end nodes
     length_m: Option<f64>, // None: geodesic length of the geometry
     frc: Frc,
     fow: Fow,
@@ -70,6 +71,33 @@ impl TestNetworkBuilder {
             id,
             start_node,
             end_node,
+            via: Vec::new(),
+            length_m: Some(length_m),
+            frc,
+            fow,
+            is_access_road: false,
+        });
+        self
+    }
+
+    /// Like [`Self::add_edge`], with `via` as (lat, lon) shape points between
+    /// the end nodes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_edge_via(
+        mut self,
+        id: u64,
+        start_node: i64,
+        end_node: i64,
+        via: &[(f64, f64)],
+        length_m: f64,
+        frc: Frc,
+        fow: Fow,
+    ) -> Self {
+        self.edges.push(PendingEdge {
+            id,
+            start_node,
+            end_node,
+            via: via.to_vec(),
             length_m: Some(length_m),
             frc,
             fow,
@@ -92,6 +120,7 @@ impl TestNetworkBuilder {
             id,
             start_node,
             end_node,
+            via: Vec::new(),
             length_m: Some(length_m),
             frc,
             fow,
@@ -113,6 +142,7 @@ impl TestNetworkBuilder {
             id,
             start_node,
             end_node,
+            via: Vec::new(),
             length_m: None,
             frc,
             fow,
@@ -146,10 +176,11 @@ impl TestNetworkBuilder {
                 )
             });
 
-            let geometry = LineString::from(vec![
-                (start_coord.1, start_coord.0),
-                (end_coord.1, end_coord.0),
-            ]);
+            let geometry: LineString<f64> = std::iter::once(*start_coord)
+                .chain(pending.via.iter().copied())
+                .chain(std::iter::once(*end_coord))
+                .map(|(lat, lon)| (lon, lat))
+                .collect();
 
             let mut edge = Edge::new(pending.id, geometry, pending.frc, pending.fow);
             edge.is_access_road = pending.is_access_road;
