@@ -4,22 +4,19 @@ use petgraph::visit::EdgeRef;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Functional Road Class — OpenLR binary values (0–7) that represent road importance.
-///
-/// HERE uses a 5-level classification (FC1–FC5, where FC1 is highest importance).
-/// OpenLR encodes these as 0-indexed values: Frc0=FC1, Frc1=FC2, ..., Frc4=FC5.
-/// Values Frc5–Frc7 exist in the OpenLR spec (3 bits = 0–7) but are unused by HERE.
+/// Functional Road Class, 0 (most important) to 7. HERE's FC1–FC5 encode as
+/// Frc0–Frc4; HERE never uses Frc5–Frc7.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum Frc {
-    Frc0 = 0, // Highest importance: motorways, controlled-access highways (HERE: FC1)
-    Frc1 = 1, // Major routes for travel between/through cities (HERE: FC2)
-    Frc2 = 2, // High volume roads interconnecting with major routes (HERE: FC3)
-    Frc3 = 3, // Moderate speed roads between neighborhoods (HERE: FC4)
-    Frc4 = 4, // Lowest importance: local/residential roads (HERE: FC5)
-    Frc5 = 5, // Not used by HERE
-    Frc6 = 6, // Not used by HERE
-    Frc7 = 7, // Not used by HERE
+    Frc0 = 0, // motorways
+    Frc1 = 1, // major routes between/through cities
+    Frc2 = 2, // high-volume roads feeding major routes
+    Frc3 = 3, // roads between neighborhoods
+    Frc4 = 4, // local/residential
+    Frc5 = 5,
+    Frc6 = 6,
+    Frc7 = 7,
 }
 
 impl Frc {
@@ -36,37 +33,24 @@ impl Frc {
         }
     }
 
-    /// Map OSM highway tag to OpenLR FRC value.
-    ///
-    /// Maps OSM road types to the 0-indexed FRC values used in OpenLR binary format.
-    /// These correspond to HERE's FC1–FC5 importance levels (Frc0=FC1 ... Frc4=FC5).
-    ///
-    /// All navigable OSM roads map into the Frc0–Frc4 range to match HERE-encoded LRPs.
-    /// Residential/access roads are also Frc4 (same as tertiary) but are deprioritized
-    /// via A* cost penalties rather than FRC classification.
+    /// Map an OSM `highway` tag onto HERE's Frc0–Frc4 range.
     pub fn from_osm_highway(highway: &str) -> Self {
         match highway {
-            // Frc0: Controlled-access highways (highest importance)
             "motorway" => Frc::Frc0,
-            // Frc1: Major routes for inter-city travel
             "trunk" => Frc::Frc1,
-            // Frc2: High volume roads interconnecting with major routes
             "primary" => Frc::Frc2,
-            // Frc3: Moderate speed roads connecting neighborhoods
             "secondary" => Frc::Frc3,
             "motorway_link" | "trunk_link" | "primary_link" => Frc::Frc3,
-            // Frc4: Local/residential roads (lowest importance in HERE's scheme)
             "tertiary" | "secondary_link" | "tertiary_link" | "unclassified" | "residential"
             | "living_street" | "service" | "track" => Frc::Frc4,
-            // Not in HERE's network — use Frc7 so these edges won't match
-            // HERE-encoded LRPs (outside ±2 tolerance from Frc0–Frc4)
+            // Not drivable in HERE's network. Frc7 is far enough from Frc0–Frc4
+            // that the default ±2 tolerance never matches it.
             _ => Frc::Frc7,
         }
     }
 
-    /// Returns true for OSM highway tags that represent access/local roads
-    /// (residential, living_street, service, track). These are deprioritized
-    /// via A* cost penalties rather than FRC classification.
+    /// Residential, living_street, service and track. These share Frc4 with
+    /// tertiary roads, so A* tells them apart with a cost penalty instead.
     pub fn is_access_road(highway: &str) -> bool {
         matches!(
             highway,
@@ -74,7 +58,7 @@ impl Frc {
         )
     }
 
-    /// Check if another FRC is within tolerance (per OpenLR spec: ±1 or exact)
+    /// Whether the two classes are at most `tolerance` levels apart.
     pub fn is_compatible(&self, other: Frc, tolerance: u8) -> bool {
         let diff = (*self as i8 - other as i8).unsigned_abs();
         diff <= tolerance
@@ -109,7 +93,8 @@ impl Fow {
         }
     }
 
-    /// Map OSM tags to FOW
+    /// Infer FOW from OSM tags. The loader has no `junction` or `oneway`
+    /// columns and passes `None` for both.
     pub fn from_osm_tags(
         highway: &str,
         junction: Option<&str>,
@@ -125,7 +110,7 @@ impl Fow {
             "motorway_link" | "trunk_link" | "primary_link" | "secondary_link"
             | "tertiary_link" => Fow::SlipRoad,
             "trunk" | "primary" | "secondary" => {
-                // Multiple carriageway if has many lanes or is oneway with parallel road
+                // OSM maps dual carriageways as two one-way ways.
                 if lanes.unwrap_or(1) >= 4 || oneway == Some("yes") {
                     Fow::MultipleCarriageway
                 } else {
@@ -136,16 +121,11 @@ impl Fow {
         }
     }
 
-    /// Get FOW substitution score for cross-provider decoding.
-    /// Returns a score from 0.0 (incompatible) to 1.0 (exact match).
-    /// Based on the official TomTom OpenLR reference implementation.
-    ///
-    /// The matrix encodes how well `other` (from the LRP) can be substituted
-    /// by `self` (from the map edge).
+    /// How well an edge with this FOW stands in for an LRP with FOW `other`:
+    /// 1.0 for an exact match, 0.0 for incompatible. The matrix comes from
+    /// TomTom's reference implementation.
     pub fn substitution_score(&self, other: Fow) -> f64 {
-        // FOW substitution score matrix from official TomTom OpenLR implementation
-        // Row = LRP's FOW (wanted), Column = Edge's FOW (actual/self)
-        // Score 1.0 = exact match, 0.0 = incompatible, 0.5-0.75 = partial match
+        // Rows: LRP FOW. Columns: edge FOW.
         #[rustfmt::skip]
         const FOW_SCORE_MATRIX: [[f64; 8]; 8] = [
             //       Und   Mwy   Mlt   Sgl   Rnd   Tsq   Slp   Oth
@@ -165,33 +145,29 @@ impl Fow {
     }
 }
 
-/// A node in the road network (intersection or endpoint)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Node {
-    pub id: i64,
+    pub id: i64, // OSM node id
     pub coord: Point<f64>,
 }
 
-/// An edge in the road network (road segment)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Edge {
-    pub id: u64, // stableEdgeId from the source data
+    pub id: u64, // stableEdgeId
     pub geometry: LineString<f64>,
     pub length_m: f64,
     pub frc: Frc,
     pub fow: Fow,
-    pub bearing_start: f64, // Bearing at start of edge (0-360)
-    pub bearing_end: f64,   // Bearing at end of edge (0-360)
-    /// True for residential/living_street/service/track roads.
-    /// Used by A* to apply a cost penalty, preferring tertiary over residential.
+    // Bearings of the first and last geometry segments, degrees in [0, 360).
+    pub bearing_start: f64,
+    pub bearing_end: f64,
+    /// See [`Frc::is_access_road`].
     pub is_access_road: bool,
 }
 
 impl Edge {
-    /// Create edge from geometry with pre-computed metrics.
-    /// Use this when metrics have already been computed during geometry parsing.
-    /// Create edge from geometry with computed attributes.
-    /// Use this when parsing geometry separately from metrics computation.
+    /// Build an edge, computing length and bearings from `geometry`. Only tests
+    /// use this; the loader computes those metrics itself.
     #[allow(dead_code)]
     pub fn new(id: u64, geometry: LineString<f64>, frc: Frc, fow: Fow) -> Self {
         let length_m = Geodesic.length(&geometry);
@@ -215,27 +191,25 @@ impl Edge {
             return (0.0, 0.0);
         }
 
-        // Start bearing: from first point toward second
         let start_bearing = Geodesic.bearing(
             Point::new(coords[0].x, coords[0].y),
             Point::new(coords[1].x, coords[1].y),
         );
 
-        // End bearing: from second-to-last toward last
         let n = coords.len();
         let end_bearing = Geodesic.bearing(
             Point::new(coords[n - 2].x, coords[n - 2].y),
             Point::new(coords[n - 1].x, coords[n - 1].y),
         );
 
-        // Normalize to 0-360
         let normalize = |b: f64| ((b % 360.0) + 360.0) % 360.0;
 
         (normalize(start_bearing), normalize(end_bearing))
     }
 }
 
-/// The road network graph
+/// Directed road graph. The id → index maps are only needed while loading;
+/// [`compact`](Self::compact) drops them.
 pub struct RoadNetwork {
     pub graph: DiGraph<Node, Edge>,
     pub node_id_to_index: Option<HashMap<i64, NodeIndex>>,
@@ -251,7 +225,6 @@ impl RoadNetwork {
         }
     }
 
-    /// Create a new network with pre-allocated capacity.
     pub fn new_with_capacity(node_hint: usize, edge_hint: usize) -> Self {
         RoadNetwork {
             graph: DiGraph::with_capacity(node_hint, edge_hint),
@@ -260,16 +233,13 @@ impl RoadNetwork {
         }
     }
 
-    /// Drop the ID-to-index lookup maps to free memory.
-    ///
-    /// Call this after loading is complete and the maps are no longer needed.
-    /// After compaction, `add_node`, `get_or_add_node`, and `add_edge` will panic.
+    /// Drop the id → index maps to free memory once loading is done. After
+    /// this, `add_node`, `get_or_add_node` and `add_edge` panic.
     pub fn compact(&mut self) {
         self.node_id_to_index = None;
         self.edge_id_to_index = None;
     }
 
-    /// Add a node to the network
     pub fn add_node(&mut self, node: Node) -> NodeIndex {
         let id = node.id;
         let idx = self.graph.add_node(node);
@@ -280,7 +250,6 @@ impl RoadNetwork {
         idx
     }
 
-    /// Get or create a node
     pub fn get_or_add_node(&mut self, id: i64, coord: Point<f64>) -> NodeIndex {
         let map = self
             .node_id_to_index
@@ -292,7 +261,7 @@ impl RoadNetwork {
         self.add_node(Node { id, coord })
     }
 
-    /// Add an edge to the network
+    /// Panics if either endpoint node hasn't been added yet.
     pub fn add_edge(&mut self, from_node: i64, to_node: i64, edge: Edge) -> EdgeIndex {
         let node_map = self
             .node_id_to_index
@@ -310,52 +279,47 @@ impl RoadNetwork {
         idx
     }
 
-    /// Get edge by index
     pub fn edge(&self, idx: EdgeIndex) -> Option<&Edge> {
         self.graph.edge_weight(idx)
     }
 
-    /// Get node by index
     pub fn node(&self, idx: NodeIndex) -> Option<&Node> {
         self.graph.node_weight(idx)
     }
 
-    /// Get all outgoing edges from a node
     pub fn outgoing_edges(&self, node_idx: NodeIndex) -> impl Iterator<Item = EdgeIndex> + '_ {
         self.graph.edges(node_idx).map(|e| e.id())
     }
 
-    /// Get the target node of an edge
     pub fn edge_target(&self, edge_idx: EdgeIndex) -> Option<NodeIndex> {
         self.graph.edge_endpoints(edge_idx).map(|(_, t)| t)
     }
 
-    /// Get the source node of an edge
     pub fn edge_source(&self, edge_idx: EdgeIndex) -> Option<NodeIndex> {
         self.graph.edge_endpoints(edge_idx).map(|(s, _)| s)
     }
 
-    /// Check whether a node is a *valid* node per OpenLR whitepaper Rule 4 (§6).
+    /// Whether a node is valid under OpenLR Rule 4 (whitepaper §6).
     ///
-    /// A node is **invalid** when a route search can step over it without making
-    /// a choice: it connects exactly two distinct neighbours, with at most one
-    /// incoming and one outgoing edge per neighbour and equal in/out degree
-    /// (i.e. 1-in/1-out, or 2-in/2-out on a bidirectional through-road).
-    /// Everything else — junctions, dead ends, one-way merges/splits — is valid.
+    /// A node is invalid when a route search passes through it without a
+    /// choice: exactly two neighbours, at most one edge each way per neighbour,
+    /// and equal in- and out-degree. That covers 1-in/1-out nodes and the
+    /// middle of a two-way road. Junctions, dead ends and one-way merges or
+    /// splits are all valid.
     ///
-    /// Encoders place LRPs on valid nodes, so a decoded path terminating on an
-    /// invalid node has most likely stopped short of the intended endpoint.
+    /// Encoders put LRPs on valid nodes, so a decoded path that ends on an
+    /// invalid one has probably stopped short.
     pub fn is_valid_node(&self, node_idx: NodeIndex) -> bool {
         use petgraph::Direction;
 
         let mut in_deg = 0usize;
         let mut out_deg = 0usize;
-        // (neighbour, incoming count, outgoing count) — at most 2 tracked before bailing
+        // (neighbour, edges in, edges out). A third neighbour means a junction.
         let mut neighbours: Vec<(NodeIndex, usize, usize)> = Vec::with_capacity(3);
 
         let mut record = |other: NodeIndex, incoming: bool| -> bool {
             if other == node_idx {
-                return false; // self-loop: not a through-node
+                return false; // self-loop
             }
             match neighbours.iter_mut().find(|(n, _, _)| *n == other) {
                 Some(entry) => {
@@ -367,7 +331,7 @@ impl RoadNetwork {
                 }
                 None => {
                     if neighbours.len() >= 2 {
-                        return false; // 3+ distinct neighbours: junction
+                        return false;
                     }
                     neighbours.push(if incoming {
                         (other, 1, 0)
@@ -395,18 +359,15 @@ impl RoadNetwork {
         if neighbours.len() != 2 || in_deg != out_deg {
             return true;
         }
-        // Each neighbour may contribute at most one edge in each direction;
-        // parallel edges to the same neighbour imply a real choice.
+        // Parallel edges to the same neighbour are a real choice.
         if neighbours.iter().any(|(_, i, o)| *i > 1 || *o > 1) {
             return true;
         }
         false
     }
 
-    /// If `node_idx` is an invalid node (see [`is_valid_node`](Self::is_valid_node)),
-    /// return the single outgoing edge that continues travel after arriving via
-    /// `incoming` — i.e. the only exit that is not a U-turn. Returns `None` at a
-    /// valid node, or if `incoming` does not actually end at `node_idx`.
+    /// At an invalid node, the one exit that isn't a U-turn after arriving via
+    /// `incoming`. `None` if the node is valid or `incoming` doesn't end there.
     pub fn forced_continuation(
         &self,
         node_idx: NodeIndex,
@@ -422,9 +383,8 @@ impl RoadNetwork {
             .map(|e| e.id())
     }
 
-    /// Mirror of [`forced_continuation`](Self::forced_continuation) for walking
-    /// backwards: if `node_idx` is invalid, return the single incoming edge a
-    /// traveller must have arrived on before leaving via `outgoing`.
+    /// [`forced_continuation`](Self::forced_continuation) in reverse: the edge
+    /// a traveller must have arrived on before leaving via `outgoing`.
     pub fn forced_predecessor(
         &self,
         node_idx: NodeIndex,
@@ -489,7 +449,6 @@ mod tests {
 
     #[test]
     fn test_fow_substitution_score() {
-        // Exact match should be 1.0
         assert_eq!(Fow::Motorway.substitution_score(Fow::Motorway), 1.0);
         assert_eq!(
             Fow::SingleCarriageway.substitution_score(Fow::SingleCarriageway),
@@ -500,9 +459,7 @@ mod tests {
         assert_eq!(Fow::Undefined.substitution_score(Fow::Motorway), 0.5);
         assert_eq!(Fow::Motorway.substitution_score(Fow::Undefined), 0.5);
 
-        // Motorway and MultipleCarriageway should be compatible (0.75)
-        // This is important for cross-provider decoding where freeways may
-        // be encoded as MultipleCarriageway by some providers
+        // Some providers encode freeways as MultipleCarriageway.
         assert_eq!(
             Fow::Motorway.substitution_score(Fow::MultipleCarriageway),
             0.75

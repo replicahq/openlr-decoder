@@ -252,6 +252,18 @@ all ~100 such overshoots while keeping every extension that landed on HERE's end
 than one edge, `*_offset_fraction` (relative to the first/last edge) can exceed 1.0;
 the meter offsets are authoritative.
 
+## Comment Style
+
+1. A doc comment covers what the signature doesn't: panics, units, ranges, non-obvious
+   `None` cases. Skip it when the name already says everything.
+2. Keep the *why*: spec section references, HERE quirks, corpus measurements.
+3. Say each fact once, where it applies; cross-link with [`Item`] instead of repeating it.
+4. Fix or delete anything wrong or speculative rather than polishing it.
+5. Plain sentences. No bold, no em-dash asides, no "i.e." chains.
+
+Comment-only changes must pass `python qa/check_comment_only.py [ref]` (default `main`),
+which diffs each changed `.rs` file with comments stripped.
+
 ## Building & Testing
 
 Use `uv` for Python environment management.
