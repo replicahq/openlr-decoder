@@ -46,3 +46,6 @@ openlr_decoder = { path = ".", features = ["test-utils"] }
 [profile.release]
 lto = true
 codegen-units = 1
+
+[lints.rust]
+unsafe_code = "forbid"
