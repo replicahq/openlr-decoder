@@ -1,4 +1,4 @@
-use geo::{Bearing, Geodesic, Length, LineString, Point};
+use geo::{Haversine, Length, LineString, Point};
 use petgraph::graph::{DiGraph, EdgeIndex, NodeIndex};
 use petgraph::visit::EdgeRef;
 use serde::{Deserialize, Serialize};
@@ -158,20 +158,16 @@ pub struct Edge {
     pub length_m: f64,
     pub frc: Frc,
     pub fow: Fow,
-    // Bearings of the first and last geometry segments, degrees in [0, 360).
-    pub bearing_start: f64,
-    pub bearing_end: f64,
     /// See [`Frc::is_access_road`].
     pub is_access_road: bool,
 }
 
 impl Edge {
-    /// Build an edge, computing length and bearings from `geometry`. Only tests
-    /// use this; the loader computes those metrics itself.
+    /// Build an edge with its length computed from `geometry`, as the loader
+    /// does. Only tests use this.
     #[allow(dead_code)]
     pub fn new(id: u64, geometry: LineString<f64>, frc: Frc, fow: Fow) -> Self {
-        let length_m = Geodesic.length(&geometry);
-        let (bearing_start, bearing_end) = Self::compute_bearings(&geometry);
+        let length_m = Haversine.length(&geometry);
 
         Edge {
             id,
@@ -179,32 +175,8 @@ impl Edge {
             length_m,
             frc,
             fow,
-            bearing_start,
-            bearing_end,
             is_access_road: false,
         }
-    }
-
-    fn compute_bearings(geom: &LineString<f64>) -> (f64, f64) {
-        let coords: Vec<_> = geom.coords().collect();
-        if coords.len() < 2 {
-            return (0.0, 0.0);
-        }
-
-        let start_bearing = Geodesic.bearing(
-            Point::new(coords[0].x, coords[0].y),
-            Point::new(coords[1].x, coords[1].y),
-        );
-
-        let n = coords.len();
-        let end_bearing = Geodesic.bearing(
-            Point::new(coords[n - 2].x, coords[n - 2].y),
-            Point::new(coords[n - 1].x, coords[n - 1].y),
-        );
-
-        let normalize = |b: f64| ((b % 360.0) + 360.0) % 360.0;
-
-        (normalize(start_bearing), normalize(end_bearing))
     }
 }
 

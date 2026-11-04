@@ -213,8 +213,6 @@ mod tests {
         assert_eq!(edge.frc, Frc::Frc2);
         assert_eq!(edge.fow, Fow::SingleCarriageway);
         assert_eq!(edge.length_m, 5000.0);
-
-        assert!(edge.bearing_start > 80.0 && edge.bearing_start < 100.0);
     }
 
     #[test]
