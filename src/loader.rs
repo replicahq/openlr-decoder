@@ -1,4 +1,5 @@
-//! Load road network from parquet files matching the BigQuery export schema
+//! Build a [`RoadNetwork`] and [`SpatialIndex`] from Arrow record batches or a
+//! parquet file. [`road_network_schema`] documents the expected columns.
 
 use ahash::AHashMap;
 use std::fs::File;
@@ -21,15 +22,10 @@ use rayon::prelude::*;
 use crate::graph::{Edge, Fow, Frc, Node, RoadNetwork};
 use crate::spatial::{EdgeEnvelope, SpatialIndex};
 
-/// Geometry column format detected from Arrow schema
 enum GeometryFormat<'a> {
-    /// WKB binary (Binary, LargeBinary, BinaryView)
     Wkb(WkbSource<'a>),
-    /// WKT string (String, LargeString, StringView)
     Wkt(WktSource<'a>),
-    /// GeoArrow native LineString
     GeoArrow(LineStringArray),
-    /// No geometry column present
     None,
 }
 
@@ -45,7 +41,6 @@ enum WktSource<'a> {
     StringView(&'a StringViewArray),
 }
 
-/// Geometry with pre-computed metrics to avoid redundant passes over coordinates
 struct GeometryWithMetrics {
     geometry: LineString<f64>,
     length_m: f64,
@@ -53,22 +48,19 @@ struct GeometryWithMetrics {
     bearing_end: f64,
 }
 
-/// Returns the expected Arrow schema for road network parquet files.
+/// The Arrow schema the loader reads. Extra columns are ignored.
 ///
-/// Required columns:
-/// - `stableEdgeId` (UInt64): unique edge identifier
-/// - `startOsmNode` (Int64): start node ID (OSM node, resolves barrier splits)
-/// - `endOsmNode` (Int64): end node ID (OSM node, resolves barrier splits)
-/// - `startLat`, `startLon`, `endLat`, `endLon` (Float64): endpoint coordinates
-/// - `highway` (Utf8): OSM highway tag
-///
-/// Optional columns:
-/// - `lanes` (Int64): number of lanes, used for Form of Way inference
-/// - `geometry`: LineString geometry in one of these formats:
-///   - WKB: Binary, LargeBinary, or BinaryView
-///   - WKT: String, LargeString, or StringView
-///   - GeoArrow native: List<Struct<x,y>> with geoarrow.linestring extension
-///
+/// - `stableEdgeId` (UInt64), `startOsmNode`/`endOsmNode` (Int64): rows with a
+///   null in any of these are skipped. Node ids are OSM nodes, so edges split
+///   at barriers still connect.
+/// - `startLat`, `startLon`, `endLat`, `endLon` (Float64), degrees.
+/// - `highway`: OSM tag, mapped by [`Frc::from_osm_highway`] and
+///   [`Fow::from_osm_tags`]. Any string type (String, LargeString, StringView).
+/// - `lanes` (Int64, optional): only used for FOW. Other types are ignored.
+/// - `geometry` (optional): WKB as any binary type, WKT as any string type, or
+///   GeoArrow `geoarrow.linestring`. Only the first part of a MultiLineString
+///   is kept. Missing or unparseable geometry falls back to the straight line
+///   between the endpoints.
 pub fn road_network_schema() -> Schema {
     Schema::new(vec![
         Field::new("stableEdgeId", DataType::UInt64, false),
@@ -84,22 +76,11 @@ pub fn road_network_schema() -> Schema {
     ])
 }
 
-/// Load a road network from a parquet file with the BigQuery export schema
-///
-/// Expected columns:
-/// - stableEdgeId (STRING): unique edge identifier
-/// - startOsmNode (INTEGER): start node ID (OSM node, resolves barrier splits)
-/// - endOsmNode (INTEGER): end node ID (OSM node, resolves barrier splits)
-/// - startLat, startLon, endLat, endLon (FLOAT): endpoint coordinates
-/// - highway (STRING): OSM highway tag
-/// - lanes (INTEGER): number of lanes (optional, for FOW)
-/// - distance (INTEGER): edge length in meters
-/// - geometry (GEOGRAPHY/WKB): edge geometry
+/// Load a parquet file with the columns described in [`road_network_schema`].
 pub fn load_network_from_parquet(path: &Path) -> Result<(RoadNetwork, SpatialIndex)> {
     let file = File::open(path).context("Failed to open parquet file")?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
 
-    // Read total row count from parquet metadata for pre-allocation
     let edge_count_hint = builder
         .metadata()
         .file_metadata()
@@ -112,19 +93,8 @@ pub fn load_network_from_parquet(path: &Path) -> Result<(RoadNetwork, SpatialInd
     build_network_from_batches_with_hint(reader.map(|r| r.map_err(|e| anyhow!(e))), edge_count_hint)
 }
 
-/// Build a road network from an iterator of Arrow RecordBatches.
-///
-/// This is the core function that processes Arrow data into a RoadNetwork.
-/// It can be called from various sources (Parquet files, PyArrow tables, Polars DataFrames).
-///
-/// Expected columns in each batch:
-/// - `stableEdgeId` (UInt64): unique edge identifier
-/// - `startOsmNode` (Int64): start node ID (OSM node, resolves barrier splits)
-/// - `endOsmNode` (Int64): end node ID (OSM node, resolves barrier splits)
-/// - `startLat`, `startLon`, `endLat`, `endLon` (Float64): endpoint coordinates
-/// - `highway` (Utf8): OSM highway tag
-/// - `lanes` (Int64, optional): number of lanes for FOW inference
-/// - `geometry` (optional): LineString geometry in WKB, WKT, or GeoArrow native format
+/// Build a network from batches with the columns described in
+/// [`road_network_schema`].
 pub fn build_network_from_batches<I>(batches: I) -> Result<(RoadNetwork, SpatialIndex)>
 where
     I: Iterator<Item = Result<RecordBatch>>,
@@ -132,10 +102,6 @@ where
     build_network_from_batches_with_hint(batches, 0)
 }
 
-/// Build a road network with pre-allocation hints for better memory efficiency.
-///
-/// `edge_count_hint` is used to pre-allocate vectors and hash maps.
-/// Pass 0 if the count is unknown.
 fn build_network_from_batches_with_hint<I>(
     batches: I,
     edge_count_hint: usize,
@@ -153,24 +119,21 @@ where
     Ok(builder.finish())
 }
 
-/// Incremental road network builder.
-///
-/// Equivalent to [`build_network_from_batches`], but lets the caller drive the
-/// loop one batch at a time. This matters for the Python bindings, which pull
-/// each batch from an Arrow stream with the GIL held and then release it to do
-/// the actual work — so a batch can be dropped before the next one is fetched
-/// instead of holding the whole stream in memory.
+/// [`build_network_from_batches`] one batch at a time. The Python bindings
+/// fetch each batch from an Arrow stream under the GIL, release the GIL to
+/// process it, and drop it before fetching the next, so the whole stream is
+/// never held in memory.
 pub struct NetworkBuilder {
     network: RoadNetwork,
     edge_envelopes: Vec<EdgeEnvelope>,
-    /// Nodes we've seen, to avoid duplicates.
+    // Node ids already added to `network`.
     seen_nodes: AHashMap<i64, Point<f64>>,
 }
 
 impl NetworkBuilder {
-    /// Create a builder, pre-allocating for `edge_count_hint` edges (pass 0 if unknown).
+    /// Pre-allocate for `edge_count_hint` edges; 0 if unknown.
     pub fn with_capacity(edge_count_hint: usize) -> Self {
-        // Estimate node count as ~edge count (road networks have roughly equal nodes and edges)
+        // Road networks have roughly as many nodes as edges.
         let node_hint = edge_count_hint;
 
         let network = if edge_count_hint > 0 {
@@ -186,7 +149,6 @@ impl NetworkBuilder {
         }
     }
 
-    /// Add one batch of edges to the network.
     pub fn push_batch(&mut self, batch: &RecordBatch) -> Result<()> {
         process_batch(
             batch,
@@ -196,14 +158,12 @@ impl NetworkBuilder {
         )
     }
 
-    /// Consume the builder and produce the network and its spatial index.
     pub fn finish(mut self) -> (RoadNetwork, SpatialIndex) {
-        // Explicitly drop seen_nodes before R-tree bulk_load to reduce peak memory
+        // Free this before the R-tree bulk load to lower peak memory.
         drop(self.seen_nodes);
 
         let spatial_index = SpatialIndex::new(self.edge_envelopes);
 
-        // Drop the ID-to-index lookup maps; they are only needed during construction.
         self.network.compact();
 
         (self.network, spatial_index)
@@ -216,22 +176,20 @@ impl Default for NetworkBuilder {
     }
 }
 
-/// Represents a fully-processed edge ready to insert into the graph.
-/// All expensive computations (geometry parsing, FRC/FOW inference, Edge::new) are done.
+/// An edge built in the parallel phase of [`process_batch`], waiting for
+/// sequential insertion into the graph.
 struct PendingEdge {
     sv_id: i64,
     ev_id: i64,
     edge: Edge,
 }
 
-/// Process a single RecordBatch and add its edges to the network.
 fn process_batch(
     batch: &RecordBatch,
     network: &mut RoadNetwork,
     edge_envelopes: &mut Vec<EdgeEnvelope>,
     seen_nodes: &mut AHashMap<i64, Point<f64>>,
 ) -> Result<()> {
-    // Extract and validate required columns, providing clear errors for type mismatches
     fn require_column<'a, T: 'static>(batch: &'a RecordBatch, name: &str) -> Result<&'a T> {
         let col = batch
             .column_by_name(name)
@@ -253,7 +211,7 @@ fn process_batch(
     let end_lat = require_column::<Float64Array>(batch, "endLat")?;
     let end_lon = require_column::<Float64Array>(batch, "endLon")?;
 
-    // Highway can be String, LargeString, or StringView (Polars PyCapsule uses view types)
+    // Polars exports strings as StringView.
     let highway_col = batch
         .column_by_name("highway")
         .ok_or_else(|| anyhow!("Missing required column 'highway'"))?;
@@ -271,11 +229,11 @@ fn process_batch(
         .column_by_name("lanes")
         .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
 
-    // Detect geometry format: WKB (binary), WKT (string), or GeoArrow native
     let geometry_format = detect_geometry_format(batch);
 
-    // Pre-scan batch to collect unique node IDs and coordinates (deduplication)
-    // This reduces HashMap operations from 2*num_edges to ~unique_nodes
+    // Dedupe the batch's nodes locally first so the long-lived `seen_nodes` map
+    // is probed once per unique node rather than twice per edge. The first
+    // coordinate seen for a node id wins.
     let mut batch_nodes: AHashMap<i64, Point<f64>> = AHashMap::new();
     for row in 0..batch.num_rows() {
         if stable_edge_id.is_null(row) || start_vertex.is_null(row) || end_vertex.is_null(row) {
@@ -296,7 +254,6 @@ fn process_batch(
             .or_insert_with(|| Point::new(ev_lon, ev_lat));
     }
 
-    // Add new nodes to network (only those not seen before)
     for (node_id, coord) in batch_nodes {
         if let std::collections::hash_map::Entry::Vacant(e) = seen_nodes.entry(node_id) {
             e.insert(coord);
@@ -304,11 +261,10 @@ fn process_batch(
         }
     }
 
-    // PARALLEL PHASE: Process all rows in parallel (geometry parsing, FRC/FOW, metrics, Edge construction)
+    // Build edges in parallel; only graph insertion has to be sequential.
     let pending_edges: Vec<Option<PendingEdge>> = (0..batch.num_rows())
         .into_par_iter()
         .map(|row| {
-            // Skip nulls
             if stable_edge_id.is_null(row) || start_vertex.is_null(row) || end_vertex.is_null(row) {
                 return None;
             }
@@ -321,7 +277,6 @@ fn process_batch(
             let ev_lat = end_lat.value(row);
             let ev_lon = end_lon.value(row);
 
-            // Parse highway tag for FRC/FOW (handle String, LargeString, and StringView)
             let hw_tag: &str = if let Some(hw) = highway_string {
                 if hw.is_null(row) {
                     ""
@@ -354,7 +309,6 @@ fn process_batch(
             });
             let fow = Fow::from_osm_tags(hw_tag, None, None, lane_count);
 
-            // Parse geometry based on detected format
             let fallback = || LineString::from(vec![(sv_lon, sv_lat), (ev_lon, ev_lat)]);
 
             let geom: LineString<f64> = match &geometry_format {
@@ -422,10 +376,8 @@ fn process_batch(
                 GeometryFormat::None => fallback(),
             };
 
-            // Compute metrics during geometry processing (fused pass)
             let geom_with_metrics = linestring_with_metrics(geom);
 
-            // Create edge with pre-computed metrics (no redundant computation)
             let edge = Edge {
                 id: edge_id,
                 geometry: geom_with_metrics.geometry,
@@ -441,12 +393,9 @@ fn process_batch(
         })
         .collect();
 
-    // SEQUENTIAL PHASE: Insert edges into graph and build envelopes
     for pending in pending_edges.into_iter().flatten() {
-        // Add edge to graph
         let edge_idx = network.add_edge(pending.sv_id, pending.ev_id, pending.edge);
 
-        // Add to spatial index (borrow geometry from graph)
         let edge_geom = &network.edge(edge_idx).unwrap().geometry;
         edge_envelopes.push(EdgeEnvelope::new(edge_idx, edge_geom));
     }
@@ -454,7 +403,8 @@ fn process_batch(
     Ok(())
 }
 
-/// Detect the geometry format from the batch schema and data.
+/// A `geoarrow.linestring` extension wins; otherwise any binary type is WKB and
+/// any string type is WKT.
 fn detect_geometry_format<'a>(batch: &'a RecordBatch) -> GeometryFormat<'a> {
     let schema = batch.schema();
     let Some((idx, field)) = schema.column_with_name("geometry") else {
@@ -462,17 +412,14 @@ fn detect_geometry_format<'a>(batch: &'a RecordBatch) -> GeometryFormat<'a> {
     };
     let col = batch.column(idx);
 
-    // Check for GeoArrow extension type metadata
     if let Some(ext_name) = field.metadata().get("ARROW:extension:name") {
         if ext_name.starts_with("geoarrow.linestring") {
-            // Try to parse as GeoArrow LineString
             if let Some(arr) = try_parse_geoarrow_linestring(col.clone(), field) {
                 return GeometryFormat::GeoArrow(arr);
             }
         }
     }
 
-    // Check for binary types (WKB)
     if let Some(arr) = col.as_any().downcast_ref::<BinaryArray>() {
         return GeometryFormat::Wkb(WkbSource::Binary(arr));
     }
@@ -483,7 +430,6 @@ fn detect_geometry_format<'a>(batch: &'a RecordBatch) -> GeometryFormat<'a> {
         return GeometryFormat::Wkb(WkbSource::BinaryView(arr));
     }
 
-    // Check for string types (WKT)
     if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
         return GeometryFormat::Wkt(WktSource::String(arr));
     }
@@ -497,32 +443,26 @@ fn detect_geometry_format<'a>(batch: &'a RecordBatch) -> GeometryFormat<'a> {
     GeometryFormat::None
 }
 
-/// Try to parse an Arrow array as a GeoArrow LineString array.
 fn try_parse_geoarrow_linestring(col: ArrayRef, field: &Field) -> Option<LineStringArray> {
-    // Parse the GeoArrow type from field metadata
     let geo_type = GeoArrowType::try_from(field).ok()?;
     let line_type = match geo_type {
         GeoArrowType::LineString(t) => t,
         _ => return None,
     };
 
-    // Try to convert the array
     LineStringArray::try_from((col.as_ref(), line_type)).ok()
 }
 
-/// Parse WKB bytes into a LineString
 fn parse_wkb_linestring(wkb_bytes: &[u8]) -> Option<LineString<f64>> {
     let geom = wkb::Wkb(wkb_bytes.to_vec()).to_geo().ok()?;
     extract_linestring(geom)
 }
 
-/// Parse WKT string into a LineString
 fn parse_wkt_linestring(wkt_str: &str) -> Option<LineString<f64>> {
     let geom = wkt::Wkt(wkt_str).to_geo().ok()?;
     extract_linestring(geom)
 }
 
-/// Parse a GeoArrow LineString at a specific row index
 fn parse_geoarrow_linestring(arr: &LineStringArray, row: usize) -> Option<LineString<f64>> {
     use geo_traits::{CoordTrait, LineStringTrait};
 
@@ -531,7 +471,7 @@ fn parse_geoarrow_linestring(arr: &LineStringArray, row: usize) -> Option<LineSt
     Some(LineString::from(coords))
 }
 
-/// Extract a LineString from a geo::Geometry
+/// Keeps only the first part of a MultiLineString; other geometry types give `None`.
 fn extract_linestring(geom: geo::Geometry<f64>) -> Option<LineString<f64>> {
     match geom {
         geo::Geometry::LineString(ls) => Some(ls),
@@ -540,15 +480,14 @@ fn extract_linestring(geom: geo::Geometry<f64>) -> Option<LineString<f64>> {
     }
 }
 
-/// Compute edge metrics (length, bearings) from a LineString.
-/// This is optimized to walk coordinates once using Haversine approximation.
+/// Length in meters, then start and end bearings in degrees. A geometry with
+/// fewer than two points gives all zeros.
 fn compute_metrics_from_linestring(geom: &LineString<f64>) -> (f64, f64, f64) {
     let coords: Vec<_> = geom.coords().collect();
     if coords.len() < 2 {
         return (0.0, 0.0, 0.0);
     }
 
-    // Compute geodesic length using Haversine formula
     let mut total_length = 0.0;
     for i in 0..coords.len() - 1 {
         let p1 = Point::new(coords[i].x, coords[i].y);
@@ -556,20 +495,17 @@ fn compute_metrics_from_linestring(geom: &LineString<f64>) -> (f64, f64, f64) {
         total_length += haversine_distance(p1, p2);
     }
 
-    // Start bearing: from first point toward second
     let start_bearing = Geodesic.bearing(
         Point::new(coords[0].x, coords[0].y),
         Point::new(coords[1].x, coords[1].y),
     );
 
-    // End bearing: from second-to-last toward last
     let n = coords.len();
     let end_bearing = Geodesic.bearing(
         Point::new(coords[n - 2].x, coords[n - 2].y),
         Point::new(coords[n - 1].x, coords[n - 1].y),
     );
 
-    // Normalize to 0-360
     let normalize = |b: f64| ((b % 360.0) + 360.0) % 360.0;
 
     (
@@ -579,11 +515,12 @@ fn compute_metrics_from_linestring(geom: &LineString<f64>) -> (f64, f64, f64) {
     )
 }
 
-/// Fast Haversine distance approximation in meters.
-/// More efficient than full geodesic calculation for our use case.
+/// Great-circle distance in meters on a spherical earth. Cheaper than
+/// `Geodesic`, and its error (under 0.5%) is small next to the decoder's
+/// length tolerance.
 #[inline]
 fn haversine_distance(p1: Point<f64>, p2: Point<f64>) -> f64 {
-    const EARTH_RADIUS_M: f64 = 6371000.0; // Earth's radius in meters
+    const EARTH_RADIUS_M: f64 = 6371000.0;
 
     let lat1 = p1.y().to_radians();
     let lat2 = p2.y().to_radians();
@@ -597,7 +534,6 @@ fn haversine_distance(p1: Point<f64>, p2: Point<f64>) -> f64 {
     EARTH_RADIUS_M * c
 }
 
-/// Wrap a LineString with pre-computed metrics.
 fn linestring_with_metrics(geom: LineString<f64>) -> GeometryWithMetrics {
     let (length_m, bearing_start, bearing_end) = compute_metrics_from_linestring(&geom);
     GeometryWithMetrics {
@@ -608,11 +544,9 @@ fn linestring_with_metrics(geom: LineString<f64>) -> GeometryWithMetrics {
     }
 }
 
-/// Load OpenLR test codes from a parquet file
-///
-/// Expected columns:
-/// - openlr (STRING): base64-encoded OpenLR string
-/// - id (STRING, optional): identifier for the code
+/// Read base64 OpenLR codes from the `openlr` column of a parquet file,
+/// skipping nulls. Returns an empty list if the column is missing or is not
+/// a plain String array.
 pub fn load_openlr_codes(path: &Path) -> Result<Vec<String>> {
     let file = File::open(path).context("Failed to open parquet file")?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
@@ -654,7 +588,7 @@ mod tests {
 
     #[test]
     fn test_parse_wkb_linestring() {
-        // WKB for LINESTRING(0 0, 1 1, 2 2) - little endian
+        // LINESTRING(0 0, 1 1, 2 2), little-endian
         let wkb: Vec<u8> = vec![
             0x01, // Little endian
             0x02, 0x00, 0x00, 0x00, // Type: LineString (2)
@@ -685,7 +619,6 @@ mod tests {
 
     #[test]
     fn test_parse_wkb_invalid() {
-        // Invalid WKB bytes
         let result = parse_wkb_linestring(&[0x00, 0x01, 0x02]);
         assert!(result.is_none());
     }
@@ -726,7 +659,6 @@ mod tests {
 
     #[test]
     fn test_parse_wkt_wrong_geometry_type() {
-        // Point geometry should return None (we expect LineString)
         let result = parse_wkt_linestring("POINT(0 0)");
         assert!(result.is_none());
     }
@@ -737,13 +669,11 @@ mod tests {
         use arrow::datatypes::{DataType, Field, Fields};
         use geoarrow_schema::{Dimension, LineStringType, Metadata};
 
-        // Build a GeoArrow LineString array manually
-        // GeoArrow LineString is List<Struct<x: f64, y: f64>>
+        // GeoArrow LineString is List<Struct<x: f64, y: f64>>.
         let x_field = Field::new("x", DataType::Float64, false);
         let y_field = Field::new("y", DataType::Float64, false);
         let coord_fields = Fields::from(vec![x_field.clone(), y_field.clone()]);
 
-        // Create coordinate arrays for one linestring with 3 points: (0,0), (1,1), (2,2)
         let x_values: Vec<f64> = vec![0.0, 1.0, 2.0];
         let y_values: Vec<f64> = vec![0.0, 1.0, 2.0];
 
@@ -754,7 +684,6 @@ mod tests {
 
         let coord_struct = StructArray::new(coord_fields, vec![x_array, y_array], None);
 
-        // Create list array with one linestring containing all 3 coords
         let offsets = arrow::buffer::OffsetBuffer::new(vec![0i32, 3].into());
         let list_array = arrow::array::ListArray::new(
             Arc::new(Field::new_struct(
@@ -767,12 +696,10 @@ mod tests {
             None,
         );
 
-        // Convert to GeoArrow LineStringArray
         let line_type = LineStringType::new(Dimension::XY, Arc::new(Metadata::default()))
             .with_coord_type(geoarrow_schema::CoordType::Separated);
         let geoarrow_arr = LineStringArray::try_from((&list_array, line_type)).unwrap();
 
-        // Test parsing
         let result = parse_geoarrow_linestring(&geoarrow_arr, 0);
         assert!(result.is_some());
 
@@ -791,7 +718,6 @@ mod tests {
         use arrow::array::BinaryArray;
         use arrow::datatypes::{Field, Schema};
 
-        // Create a batch with a binary geometry column
         let wkb_data: Vec<Option<&[u8]>> = vec![Some(&[0x01, 0x02])];
         let geom_array = BinaryArray::from(wkb_data);
 
@@ -807,7 +733,6 @@ mod tests {
     fn test_detect_geometry_format_wkt() {
         use arrow::datatypes::{Field, Schema};
 
-        // Create a batch with a string geometry column
         let wkt_data = vec![Some("LINESTRING(0 0, 1 1)")];
         let geom_array = StringArray::from(wkt_data);
 
@@ -823,7 +748,6 @@ mod tests {
     fn test_detect_geometry_format_none() {
         use arrow::datatypes::{Field, Schema};
 
-        // Create a batch without a geometry column
         let data = vec![Some(1i64), Some(2i64)];
         let array = Int64Array::from(data);
 
@@ -839,7 +763,7 @@ mod tests {
     fn test_wrong_column_type_errors() {
         use arrow::datatypes::{Field, Schema};
 
-        // Build a batch where startOsmNode/endOsmNode are strings instead of Int64
+        // startOsmNode/endOsmNode as strings instead of Int64.
         let schema = Schema::new(vec![
             Field::new("stableEdgeId", DataType::UInt64, false),
             Field::new("startOsmNode", DataType::Utf8, false),

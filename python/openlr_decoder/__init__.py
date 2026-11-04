@@ -1,35 +1,21 @@
 """
-OpenLR decoder for Python.
-
-Fast OpenLR location reference decoding using a Rust backend.
+Decode HERE-encoded OpenLR line locations onto OSM road networks.
 
 Example:
     >>> from openlr_decoder import RoadNetwork, Decoder
-
-    # Load from Parquet file
     >>> network = RoadNetwork.from_parquet("/path/to/network.parquet")
 
-    # Or load from Arrow data (zero-copy, works with PyArrow and Polars)
-    >>> import pyarrow.parquet as pq
-    >>> table = pq.read_table("/path/to/network.parquet")
-    >>> network = RoadNetwork.from_arrow(table)
-
-    # With Polars (also zero-copy)
+    # Or from any Arrow data, such as a PyArrow Table or Polars DataFrame
     >>> import polars as pl
-    >>> df = pl.read_parquet("/path/to/network.parquet")
-    >>> network = RoadNetwork.from_arrow(df)
+    >>> network = RoadNetwork.from_arrow(pl.read_parquet("/path/to/network.parquet"))
 
     >>> decoder = Decoder(network)
-
-    # Single decode
     >>> result = decoder.decode("CwRbWyNG9RpsCQCb/jsboAD/6/+E")
     >>> print(result.edge_ids, result.length)
 
-    # Batch decode (parallel, much faster for many codes)
-    >>> results = decoder.decode_batch(codes)
-    >>> for path, error in results:
-    ...     if path:
-    ...         print(path.length)
+    # Many codes in parallel, returned as a pyarrow.RecordBatch
+    >>> batch = decoder.decode_batch(pl.Series(codes))
+    >>> df = pl.from_arrow(batch)
 """
 
 from importlib.metadata import version

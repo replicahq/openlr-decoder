@@ -130,7 +130,6 @@ Verified against the 47,931-code KC corpus where noted.
 **Not implemented**
 - **≥3 LRPs**: segments are solved pairwise; the intermediate LRP is not forced onto one shared edge (§12.1 Step 5). Untested — corpus is all 2-LRP.
 - **PointAlongLine** returns the path; offset, side-of-road and orientation are not applied.
-- **Bearing** uses the projection segment, not the 20 m BEARDIST chord (§5.2.4).
 - **FOW**: no `junction`/`oneway` columns, so `Roundabout` never occurs and `MultipleCarriageway` only via `lanes >= 4`.
 - GeoCoordinate, POI, area types and ClosedLine are unsupported.
 
