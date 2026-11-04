@@ -155,10 +155,12 @@ fn compute_score(
     fow_score: f64,
     config: &CandidateConfig,
 ) -> f64 {
-    // Normalize each component to 0-1 range (for penalty calculation)
-    let distance_penalty = distance_m / config.search_radius_m;
-    let bearing_penalty = bearing_diff / config.max_bearing_diff;
-    let frc_penalty = frc_diff as f64 / config.frc_tolerance as f64;
+    // Each value is already filtered to `<= max`, so a zero max means a zero
+    // value; score it as no penalty instead of 0/0 = NaN.
+    let normalize = |value: f64, max: f64| if max > 0.0 { value / max } else { 0.0 };
+    let distance_penalty = normalize(distance_m, config.search_radius_m);
+    let bearing_penalty = normalize(bearing_diff, config.max_bearing_diff);
+    let frc_penalty = normalize(frc_diff as f64, config.frc_tolerance as f64);
     // FOW score is already 0-1, but higher is better, so invert it for penalty
     // 1.0 (exact match) -> 0.0 penalty, 0.0 (incompatible) -> 1.0 penalty
     let fow_penalty = 1.0 - fow_score;
@@ -181,6 +183,19 @@ mod tests {
         // Perfect match (fow_score=1.0 means exact FOW match) should have score 0
         let score = compute_score(0.0, 0.0, 0, 1.0, &config);
         assert_eq!(score, 0.0);
+    }
+
+    #[test]
+    fn test_compute_score_zero_tolerances_are_finite() {
+        let config = CandidateConfig {
+            frc_tolerance: 0,
+            max_bearing_diff: 0.0,
+            ..CandidateConfig::default()
+        };
+        let near = compute_score(1.0, 0.0, 0, 1.0, &config);
+        let far = compute_score(10.0, 0.0, 0, 1.0, &config);
+        assert!(near.is_finite() && far.is_finite());
+        assert!(near < far);
     }
 
     #[test]
