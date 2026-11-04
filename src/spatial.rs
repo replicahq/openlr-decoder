@@ -162,19 +162,9 @@ pub fn project_point_to_line_fraction(point: Point<f64>, line: &LineString<f64>)
     best_fraction.clamp(0.0, 1.0)
 }
 
-/// Wrap a longitude difference into [-180, 180] so arithmetic near the
-/// antimeridian follows the short path across ±180 instead of through 0.
-fn wrap_lon_delta(dx: f64) -> f64 {
-    if dx > 180.0 {
-        dx - 360.0
-    } else if dx < -180.0 {
-        dx + 360.0
-    } else {
-        dx
-    }
-}
-
-/// Normalize a longitude into [-180, 180].
+/// Wrap a longitude, or a longitude difference, into [-180, 180]. Applied to
+/// differences it makes arithmetic near the antimeridian take the short way
+/// across ±180 instead of through 0.
 fn wrap_lon(x: f64) -> f64 {
     if x > 180.0 {
         x - 360.0
@@ -186,20 +176,20 @@ fn wrap_lon(x: f64) -> f64 {
 }
 
 /// Closest point on segment `p1`–`p2` and its fraction along the segment. The
-/// projection is planar in degrees, with longitudes wrapped via [`wrap_lon_delta`].
+/// projection is planar in degrees, with longitudes wrapped via [`wrap_lon`].
 fn project_point_to_segment(
     point: Point<f64>,
     p1: Point<f64>,
     p2: Point<f64>,
 ) -> (Point<f64>, f64) {
-    let dx = wrap_lon_delta(p2.x() - p1.x());
+    let dx = wrap_lon(p2.x() - p1.x());
     let dy = p2.y() - p1.y();
 
     if dx == 0.0 && dy == 0.0 {
         return (p1, 0.0);
     }
 
-    let px = wrap_lon_delta(point.x() - p1.x());
+    let px = wrap_lon(point.x() - p1.x());
     let t = (px * dx + (point.y() - p1.y()) * dy) / (dx * dx + dy * dy);
     let t_clamped = t.clamp(0.0, 1.0);
 
@@ -281,8 +271,7 @@ pub fn bearing_at_projection(
         return 0.0;
     };
 
-    let bearing = Geodesic.bearing(a, b);
-    ((bearing % 360.0) + 360.0) % 360.0
+    Geodesic.bearing(a, b)
 }
 
 /// The point `dist` meters along a polyline whose vertices are `cum` meters along.
@@ -296,7 +285,7 @@ fn point_at_distance(coords: &[Coord<f64>], cum: &[f64], dist: f64) -> Point<f64
             } else {
                 0.0
             };
-            let dx = wrap_lon_delta(coords[i + 1].x - coords[i].x);
+            let dx = wrap_lon(coords[i + 1].x - coords[i].x);
             return Point::new(
                 wrap_lon(coords[i].x + t * dx),
                 coords[i].y + t * (coords[i + 1].y - coords[i].y),

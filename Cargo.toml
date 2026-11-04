@@ -27,7 +27,6 @@ geo-traits = "0.3"
 rayon = "1.10"
 ahash = "0.8"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 thiserror = "2"
 anyhow = "1"
 pyo3 = { version = "0.30", features = ["extension-module"], optional = true }
@@ -39,6 +38,7 @@ python = ["pyo3", "pyo3-arrow"]
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
+serde_json = "1"
 
 [profile.release]
 lto = true
