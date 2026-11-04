@@ -280,126 +280,41 @@ mod tests {
         assert!((max_score - expected).abs() < 0.001);
     }
 
-    fn make_candidate(score: f64) -> Candidate {
-        Candidate {
-            edge_idx: EdgeIndex::new(0),
-            distance_m: 0.0,
-            bearing_diff: 0.0,
-            frc_diff: 0,
-            fow_score: 1.0,
-            score,
-            projection_fraction: 0.5,
-        }
-    }
-
+    /// `find_candidates` returns best score first, and equal scores in edge
+    /// index order.
     #[test]
-    fn test_candidate_comparison_basic() {
-        let better = make_candidate(0.5);
-        let worse = make_candidate(1.0);
+    fn test_find_candidates_order() {
+        use crate::test_utils::TestNetworkBuilder;
 
-        assert!(better.score < worse.score);
-    }
+        // Edge 12 runs ~11 m north of the LRP and is added first, so it has the
+        // lowest index but the worst score. Edges 11 and 10 coincide.
+        let (network, spatial) = TestNetworkBuilder::new()
+            .add_node(1, 0.0, 0.0)
+            .add_node(2, 0.0, 0.002)
+            .add_node(3, 0.0001, 0.0)
+            .add_node(4, 0.0001, 0.002)
+            .add_edge(12, 3, 4, 200.0, Frc::Frc4, Fow::SingleCarriageway)
+            .add_edge(11, 1, 2, 200.0, Frc::Frc4, Fow::SingleCarriageway)
+            .add_edge(10, 1, 2, 200.0, Frc::Frc4, Fow::SingleCarriageway)
+            .build();
+        let idx = |id| *network.edge_id_to_index.as_ref().unwrap().get(&id).unwrap();
 
-    #[test]
-    fn test_candidate_comparison_equal_scores() {
-        let a = make_candidate(0.5);
-        let b = make_candidate(0.5);
+        let candidates = find_candidates(
+            Point::new(0.001, 0.00002),
+            90.0,
+            Frc::Frc4,
+            Fow::SingleCarriageway,
+            BearingDirection::Forward,
+            &network,
+            &spatial,
+            &CandidateConfig::default(),
+        );
 
-        assert_eq!(a.score, b.score);
-    }
-
-    #[test]
-    fn test_candidate_sorting() {
-        // Port of the Java testComparison. Java ranks by a ratio where higher is
-        // better, so its MAX_VALUE/MIN_VALUE cases become 0.0/f64::MAX here.
-        let score_0 = make_candidate(0.0);
-        let score_001 = make_candidate(0.001);
-        let score_01 = make_candidate(0.01);
-        let score_1 = make_candidate(1.0);
-        let score_max = make_candidate(f64::MAX);
-
-        let mut candidates = [
-            score_01.clone(),
-            score_max.clone(),
-            score_0.clone(),
-            score_001.clone(),
-            score_1.clone(),
-        ];
-
-        candidates.sort_by(|a, b| a.score.partial_cmp(&b.score).unwrap());
-
-        let expected_scores = [0.0, 0.001, 0.01, 1.0, f64::MAX];
-
-        for (i, expected) in expected_scores.iter().enumerate() {
-            assert_eq!(
-                candidates[i].score, *expected,
-                "Unexpected score at index {}: got {}, expected {}",
-                i, candidates[i].score, expected
-            );
-        }
-    }
-
-    #[test]
-    fn test_candidate_sorting_edge_cases() {
-        let score_zero = make_candidate(0.0);
-        let score_tiny = make_candidate(f64::MIN_POSITIVE);
-        let score_one = make_candidate(1.0);
-        let score_large = make_candidate(1e10);
-        let score_infinity = make_candidate(f64::INFINITY);
-
-        let mut candidates = [
-            score_infinity.clone(),
-            score_zero.clone(),
-            score_large.clone(),
-            score_tiny.clone(),
-            score_one.clone(),
-        ];
-
-        candidates.sort_by(|a, b| a.score.partial_cmp(&b.score).unwrap());
-
-        assert_eq!(candidates[0].score, 0.0);
-        assert_eq!(candidates[1].score, f64::MIN_POSITIVE);
-        assert_eq!(candidates[2].score, 1.0);
-        assert_eq!(candidates[3].score, 1e10);
-        assert_eq!(candidates[4].score, f64::INFINITY);
-    }
-
-    #[test]
-    fn test_candidate_sorting_realistic_scores() {
-        let config = CandidateConfig::default();
-
-        let perfect = make_candidate(compute_score(0.0, 0.0, 0, 1.0, &config));
-        let good = make_candidate(compute_score(5.0, 5.0, 0, 1.0, &config));
-        let medium = make_candidate(compute_score(20.0, 10.0, 1, 0.75, &config));
-        let poor = make_candidate(compute_score(50.0, 20.0, 2, 0.5, &config));
-        let worst = make_candidate(compute_score(100.0, 30.0, 2, 0.0, &config));
-
-        let mut candidates = [
-            medium.clone(),
-            worst.clone(),
-            perfect.clone(),
-            poor.clone(),
-            good.clone(),
-        ];
-
-        candidates.sort_by(|a, b| a.score.partial_cmp(&b.score).unwrap());
-
-        assert_eq!(candidates[0].score, perfect.score);
-        assert_eq!(candidates[1].score, good.score);
-        assert_eq!(candidates[2].score, medium.score);
-        assert_eq!(candidates[3].score, poor.score);
-        assert_eq!(candidates[4].score, worst.score);
-
-        for i in 0..candidates.len() - 1 {
-            assert!(
-                candidates[i].score < candidates[i + 1].score,
-                "Score at index {} ({}) should be less than score at index {} ({})",
-                i,
-                candidates[i].score,
-                i + 1,
-                candidates[i + 1].score
-            );
-        }
+        let order: Vec<EdgeIndex> = candidates.iter().map(|c| c.edge_idx).collect();
+        assert_eq!(order, vec![idx(11), idx(10), idx(12)]);
+        assert!(idx(11) < idx(10));
+        assert_eq!(candidates[0].score, candidates[1].score);
+        assert!(candidates[1].score < candidates[2].score);
     }
 
     #[test]
