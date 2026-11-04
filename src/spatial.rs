@@ -1,4 +1,4 @@
-use geo::{Coord, HaversineDistance, LineString, Point};
+use geo::{Coord, Distance, Haversine, LineString, Point};
 use petgraph::graph::EdgeIndex;
 use rstar::{RTree, RTreeObject, AABB};
 
@@ -97,7 +97,7 @@ impl SpatialIndex {
 
         let mut results: Vec<&EdgeEnvelope> = boxes
             .iter()
-            .flat_map(|b| self.rtree.locate_in_envelope_intersecting(b))
+            .flat_map(|b| self.rtree.locate_in_envelope_intersecting(*b))
             .collect();
         if boxes.len() > 1 {
             results.sort_by_key(|e| e.edge_idx);
@@ -139,7 +139,7 @@ pub fn project_point_to_line_fraction(point: Point<f64>, line: &LineString<f64>)
     for i in 0..coords.len() - 1 {
         let p1 = Point::new(coords[i].x, coords[i].y);
         let p2 = Point::new(coords[i + 1].x, coords[i + 1].y);
-        let seg_len = p1.haversine_distance(&p2);
+        let seg_len = Haversine.distance(p1, p2);
         segments.push((total_length, seg_len));
         total_length += seg_len;
     }
@@ -158,7 +158,7 @@ pub fn project_point_to_line_fraction(point: Point<f64>, line: &LineString<f64>)
 
         // Project point onto segment
         let (closest, frac) = project_point_to_segment(point, p1, p2);
-        let dist = point.haversine_distance(&closest);
+        let dist = Haversine.distance(point, closest);
 
         if dist < best_dist {
             best_dist = dist;
@@ -241,7 +241,7 @@ pub fn bearing_at_projection(
     line: &LineString<f64>,
     direction: BearingDirection,
 ) -> f64 {
-    use geo::GeodesicBearing;
+    use geo::{Bearing, Geodesic};
 
     let coords: Vec<Coord<f64>> = line.coords().cloned().collect();
     if coords.len() < 2 {
@@ -252,7 +252,7 @@ pub fn bearing_at_projection(
     let mut cum = Vec::with_capacity(coords.len());
     cum.push(0.0);
     for i in 0..coords.len() - 1 {
-        let d = Point::from(coords[i]).haversine_distance(&Point::from(coords[i + 1]));
+        let d = Haversine.distance(Point::from(coords[i]), Point::from(coords[i + 1]));
         cum.push(cum[i] + d);
     }
     let total = *cum.last().unwrap();
@@ -262,7 +262,7 @@ pub fn bearing_at_projection(
     for i in 0..coords.len() - 1 {
         let (closest, frac) =
             project_point_to_segment(point, Point::from(coords[i]), Point::from(coords[i + 1]));
-        let dist = point.haversine_distance(&closest);
+        let dist = Haversine.distance(point, closest);
         if dist < best_dist {
             best_dist = dist;
             along = cum[i] + frac * (cum[i + 1] - cum[i]);
@@ -281,7 +281,7 @@ pub fn bearing_at_projection(
                 proj,
             ),
         };
-        (a.haversine_distance(&b) > 0.5).then_some((a, b))
+        (Haversine.distance(a, b) > 0.5).then_some((a, b))
     };
     let other = match direction {
         BearingDirection::Forward => BearingDirection::Backward,
@@ -291,7 +291,7 @@ pub fn bearing_at_projection(
         return 0.0;
     };
 
-    let bearing = a.geodesic_bearing(b);
+    let bearing = Geodesic.bearing(a, b);
     ((bearing % 360.0) + 360.0) % 360.0
 }
 

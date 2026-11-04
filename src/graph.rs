@@ -1,4 +1,4 @@
-use geo::{GeodesicBearing, GeodesicLength, LineString, Point};
+use geo::{Bearing, Geodesic, Length, LineString, Point};
 use petgraph::graph::{DiGraph, EdgeIndex, NodeIndex};
 use petgraph::visit::EdgeRef;
 use serde::{Deserialize, Serialize};
@@ -194,7 +194,7 @@ impl Edge {
     /// Use this when parsing geometry separately from metrics computation.
     #[allow(dead_code)]
     pub fn new(id: u64, geometry: LineString<f64>, frc: Frc, fow: Fow) -> Self {
-        let length_m = geometry.geodesic_length();
+        let length_m = Geodesic.length(&geometry);
         let (bearing_start, bearing_end) = Self::compute_bearings(&geometry);
 
         Edge {
@@ -216,13 +216,17 @@ impl Edge {
         }
 
         // Start bearing: from first point toward second
-        let start_bearing = Point::new(coords[0].x, coords[0].y)
-            .geodesic_bearing(Point::new(coords[1].x, coords[1].y));
+        let start_bearing = Geodesic.bearing(
+            Point::new(coords[0].x, coords[0].y),
+            Point::new(coords[1].x, coords[1].y),
+        );
 
         // End bearing: from second-to-last toward last
         let n = coords.len();
-        let end_bearing = Point::new(coords[n - 2].x, coords[n - 2].y)
-            .geodesic_bearing(Point::new(coords[n - 1].x, coords[n - 1].y));
+        let end_bearing = Geodesic.bearing(
+            Point::new(coords[n - 2].x, coords[n - 2].y),
+            Point::new(coords[n - 1].x, coords[n - 1].y),
+        );
 
         // Normalize to 0-360
         let normalize = |b: f64| ((b % 360.0) + 360.0) % 360.0;

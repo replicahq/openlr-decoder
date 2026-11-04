@@ -10,7 +10,7 @@ use arrow::array::{
     LargeStringArray, RecordBatch, StringArray, StringViewArray, UInt64Array,
 };
 use arrow::datatypes::{DataType, Field, Schema};
-use geo::{GeodesicBearing, LineString, Point};
+use geo::{Bearing, Geodesic, LineString, Point};
 use geoarrow_array::array::LineStringArray;
 use geoarrow_array::{GeoArrowArray, GeoArrowArrayAccessor};
 use geoarrow_schema::GeoArrowType;
@@ -557,13 +557,17 @@ fn compute_metrics_from_linestring(geom: &LineString<f64>) -> (f64, f64, f64) {
     }
 
     // Start bearing: from first point toward second
-    let start_bearing =
-        Point::new(coords[0].x, coords[0].y).geodesic_bearing(Point::new(coords[1].x, coords[1].y));
+    let start_bearing = Geodesic.bearing(
+        Point::new(coords[0].x, coords[0].y),
+        Point::new(coords[1].x, coords[1].y),
+    );
 
     // End bearing: from second-to-last toward last
     let n = coords.len();
-    let end_bearing = Point::new(coords[n - 2].x, coords[n - 2].y)
-        .geodesic_bearing(Point::new(coords[n - 1].x, coords[n - 1].y));
+    let end_bearing = Geodesic.bearing(
+        Point::new(coords[n - 2].x, coords[n - 2].y),
+        Point::new(coords[n - 1].x, coords[n - 1].y),
+    );
 
     // Normalize to 0-360
     let normalize = |b: f64| ((b % 360.0) + 360.0) % 360.0;
