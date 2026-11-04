@@ -7,24 +7,18 @@
 //! ```
 //!
 //! Every line is drivable both ways. Lines 2 (750 m) and 4 (800 m) both join N2
-//! and N3, so only the DNP can tell them apart; each test expects line 2.
+//! and N3, and each test expects line 2.
 //!
 //! The LRPs go through binary serialization and [`Decoder::decode`], so the
 //! decoder sees quantized values: DNPs in 58.6 m buckets and bearings in 11.25°
-//! sectors.
+//! sectors. Only `test_parallel_roads` is decided by the DNP. In the other two
+//! the quantized DNP slightly favors line 4, and line 2 wins on start bearing
+//! because line 4 leaves N2 toward an offset midpoint.
 
 use geo::{Bearing, Geodesic, Point};
 use openlr::{Coordinate, Line, LineAttributes, LocationReference, Offsets, PathAttributes};
+use openlr_decoder::test_utils::TestNetworkBuilder;
 use openlr_decoder::{DecodedPath, Decoder, Fow, Frc, RoadNetwork, SpatialIndex};
-
-// `test_utils` is `#[cfg(test)]` in the library, so integration tests can't
-// import it. Compile its source here instead; the re-exports let its
-// `crate::graph` and `crate::spatial` paths resolve.
-use openlr_decoder::{graph, spatial};
-#[allow(dead_code)]
-#[path = "../src/test_utils.rs"]
-mod test_utils;
-use test_utils::TestNetworkBuilder;
 
 /// Node coordinates from ParallelRoadsMap.xml, in (lon, lat) order.
 const NODE_1: (f64, f64) = (-73.96526, 40.75629);
