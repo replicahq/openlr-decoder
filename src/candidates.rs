@@ -135,8 +135,13 @@ pub fn find_candidates(
         })
         .collect();
 
-    // Sort by score and take top N
-    candidates.sort_by(|a, b| a.score.partial_cmp(&b.score).unwrap());
+    // Break score ties by edge index so the result doesn't depend on R-tree
+    // traversal order, which changes whenever the tree is rebalanced.
+    candidates.sort_by(|a, b| {
+        a.score
+            .total_cmp(&b.score)
+            .then(a.edge_idx.cmp(&b.edge_idx))
+    });
     candidates.truncate(config.max_candidates);
 
     candidates
