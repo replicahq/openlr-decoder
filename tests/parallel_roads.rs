@@ -15,7 +15,7 @@
 //! The tests verify that the decoder correctly chooses the shorter parallel road
 //! when that matches the expected DNP (distance to next point).
 
-use geo::{GeodesicBearing, LineString, Point};
+use geo::{Bearing, Geodesic, LineString, Point};
 use openlr_decoder::spatial::BearingDirection;
 use openlr_decoder::{
     find_candidates, Candidate, DecoderConfig, Edge, Fow, Frc, RoadNetwork, SpatialIndex,
@@ -39,7 +39,7 @@ const LINE_4_LENGTH: f64 = 800.0; // N2 -> N3 (longer parallel road)
 fn compute_bearing(from: (f64, f64), to: (f64, f64)) -> f64 {
     let p1 = Point::new(from.0, from.1);
     let p2 = Point::new(to.0, to.1);
-    let bearing = p1.geodesic_bearing(p2);
+    let bearing = Geodesic.bearing(p1, p2);
     // Normalize to 0-360
     ((bearing % 360.0) + 360.0) % 360.0
 }

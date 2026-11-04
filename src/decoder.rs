@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 
-use geo::{HaversineDistance, Point};
+use geo::{Distance, Haversine, Point};
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::visit::EdgeRef;
 use thiserror::Error;
@@ -90,7 +90,7 @@ fn bounded_astar(
     // Initialize with start node
     let start_h = network
         .node(start)
-        .map(|n| n.coord.haversine_distance(&goal_coord))
+        .map(|n| Haversine.distance(n.coord, goal_coord))
         .unwrap_or(0.0);
 
     g_scores.insert(start, 0.0);
@@ -177,7 +177,7 @@ fn bounded_astar(
 
             let h = network
                 .node(neighbor)
-                .map(|n| n.coord.haversine_distance(&goal_coord))
+                .map(|n| Haversine.distance(n.coord, goal_coord))
                 .unwrap_or(0.0);
 
             open_set.push(AStarNode {
@@ -467,7 +467,7 @@ impl<'a> Decoder<'a> {
                 new_node.and_then(|n| self.network.node(n)),
             ) {
                 (Some(old), Some(new)) => {
-                    lrp.haversine_distance(&new.coord) < lrp.haversine_distance(&old.coord)
+                    Haversine.distance(lrp, new.coord) < Haversine.distance(lrp, old.coord)
                 }
                 _ => false,
             };

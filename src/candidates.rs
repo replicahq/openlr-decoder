@@ -1,4 +1,4 @@
-use geo::{Closest, HaversineClosestPoint, HaversineDistance, Point};
+use geo::{Closest, Distance, Haversine, HaversineClosestPoint, Point};
 use petgraph::graph::EdgeIndex;
 
 use crate::graph::{Fow, Frc, RoadNetwork};
@@ -90,7 +90,7 @@ pub fn find_candidates(
                     Point::new(first.x, first.y)
                 }
             };
-            let distance_m = coord.haversine_distance(&closest);
+            let distance_m = Haversine.distance(coord, closest);
 
             // Filter by actual radius
             if distance_m > config.search_radius_m {
