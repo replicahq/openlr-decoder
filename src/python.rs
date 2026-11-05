@@ -1,4 +1,4 @@
-//! Python bindings for openlr_decoder using PyO3
+//! PyO3 bindings, built as the `openlr_decoder._openlr_decoder` extension module.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -17,7 +17,8 @@ use crate::graph::RoadNetwork;
 use crate::loader::{load_network_from_parquet, NetworkBuilder};
 use crate::spatial::SpatialIndex;
 
-/// Python-exposed road network loaded from parquet
+/// A road network graph and its spatial index. Build one with `from_parquet`
+/// or `from_arrow`.
 #[pyclass(name = "RoadNetwork")]
 pub struct PyRoadNetwork {
     network: Arc<RoadNetwork>,
@@ -26,18 +27,21 @@ pub struct PyRoadNetwork {
 
 #[pymethods]
 impl PyRoadNetwork {
-    /// Load a road network from a parquet file
+    /// Load a road network from a parquet file.
     ///
     /// Args:
-    ///     path: Path to the parquet file containing the road network
+    ///     path: Path to a parquet file with the columns described in
+    ///         `road_network_schema()`.
     ///
     /// Returns:
-    ///     RoadNetwork: The loaded road network ready for decoding
+    ///     RoadNetwork
+    ///
+    /// Raises:
+    ///     ValueError: If the file cannot be read or does not match the schema.
     #[staticmethod]
     #[pyo3(signature = (path))]
     fn from_parquet(py: Python<'_>, path: &str) -> PyResult<Self> {
-        // Parquet I/O and graph construction touch no Python objects, so run
-        // them with the GIL released.
+        // Nothing here touches Python objects, so release the GIL.
         let (network, spatial) = py
             .detach(|| load_network_from_parquet(Path::new(path)))
             .map_err(|e| PyValueError::new_err(format!("Failed to load network: {}", e)))?;
@@ -48,44 +52,41 @@ impl PyRoadNetwork {
         })
     }
 
-    /// Load a road network from Arrow data (zero-copy).
+    /// Load a road network from Arrow data.
     ///
-    /// This method accepts any Arrow-compatible data source via the Arrow PyCapsule
-    /// interface, including:
-    /// - PyArrow Table or RecordBatch
-    /// - PyArrow RecordBatchReader
-    /// - Polars DataFrame (zero-copy via Arrow)
-    /// - Any object implementing __arrow_c_stream__ or __arrow_c_array__
+    /// Accepts any object exposing `__arrow_c_stream__` or `__arrow_c_array__`,
+    /// such as a PyArrow Table, RecordBatch or RecordBatchReader, or a Polars
+    /// DataFrame. The Arrow import is zero-copy, and a stream is consumed one
+    /// batch at a time.
     ///
     /// Args:
-    ///     data: Arrow-compatible data with the road network schema.
-    ///           Must have columns: stableEdgeId (uint64), startOsmNode (int64),
-    ///           endOsmNode (int64), startLat/startLon/endLat/endLon (float64),
-    ///           highway (string). Optional: lanes (int64), geometry (binary/WKB).
+    ///     data: Arrow data with columns stableEdgeId (uint64), startOsmNode and
+    ///         endOsmNode (int64), startLat/startLon/endLat/endLon (float64) and
+    ///         highway (string). Optional: lanes (int64) and geometry (WKB, WKT
+    ///         or GeoArrow linestring). See `road_network_schema()`.
     ///
     /// Returns:
-    ///     RoadNetwork: The loaded road network ready for decoding
+    ///     RoadNetwork
+    ///
+    /// Raises:
+    ///     ValueError: If the data cannot be read or does not match the schema.
     ///
     /// Example:
-    ///     >>> import pyarrow as pa
-    ///     >>> table = pa.parquet.read_table("network.parquet")
-    ///     >>> network = RoadNetwork.from_arrow(table)
+    ///     >>> import pyarrow.parquet as pq
+    ///     >>> network = RoadNetwork.from_arrow(pq.read_table("network.parquet"))
     ///
     ///     >>> import polars as pl
-    ///     >>> df = pl.read_parquet("network.parquet")
-    ///     >>> network = RoadNetwork.from_arrow(df)  # Zero-copy!
+    ///     >>> network = RoadNetwork.from_arrow(pl.read_parquet("network.parquet"))
     #[staticmethod]
     #[pyo3(signature = (data))]
     fn from_arrow(py: Python<'_>, data: PyRecordBatchReader) -> PyResult<Self> {
-        // Convert to arrow-rs RecordBatchReader via pyo3-arrow (zero-copy)
         let reader = data
             .into_reader()
             .map_err(|e| PyValueError::new_err(format!("Failed to read Arrow data: {}", e)))?;
 
-        // Pull batches with the GIL held — the stream's producer may be implemented
-        // in Python — but release it for the graph construction, which is the
-        // expensive part and touches no Python objects. Each batch is dropped before
-        // the next is fetched, so a streaming reader is still consumed incrementally.
+        // Pull each batch with the GIL held, since the stream's producer may be
+        // Python code, and release it for graph construction, the expensive part.
+        // Each batch is dropped before the next is fetched.
         let mut builder = NetworkBuilder::default();
         for batch in reader {
             let batch = batch
@@ -102,80 +103,83 @@ impl PyRoadNetwork {
         })
     }
 
-    /// Get the number of edges in the network
+    /// Number of directed edges.
     #[getter]
     fn edge_count(&self) -> usize {
         self.network.graph.edge_count()
     }
 
-    /// Get the number of nodes in the network
+    /// Number of nodes (distinct OSM node ids).
     #[getter]
     fn node_count(&self) -> usize {
         self.network.graph.node_count()
     }
 }
 
-/// Configuration for the OpenLR decoder
+/// Decoder settings. Every argument is optional; the defaults are tuned for
+/// HERE-encoded codes on an OSM network.
 #[pyclass(name = "DecoderConfig")]
 #[derive(Clone)]
 pub struct PyDecoderConfig {
-    /// Search radius in meters for finding candidate edges
+    /// Radius in meters searched around each LRP for candidate edges.
     #[pyo3(get, set)]
     pub search_radius_m: f64,
-    /// Maximum bearing difference in degrees
+    /// Largest bearing difference in degrees between an LRP and a candidate edge.
     #[pyo3(get, set)]
     pub max_bearing_diff: f64,
-    /// FRC tolerance (0-7)
+    /// Largest FRC difference (0-7) between an LRP and a candidate edge. The
+    /// path between two LRPs may also exceed their LFRCNP by this much.
     #[pyo3(get, set)]
     pub frc_tolerance: u8,
-    /// Maximum number of candidates per LRP
+    /// Candidates kept per LRP, best-scored first.
     #[pyo3(get, set)]
     pub max_candidates: usize,
-    /// Maximum distance from LRP to candidate edge in meters
+    /// Decoding fails unless at least one LRP has a candidate within this many
+    /// meters. The other LRPs may match up to `search_radius_m` away.
     #[pyo3(get, set)]
     pub max_candidate_distance_m: f64,
-    /// Path length tolerance as a fraction (e.g., 0.20 = 20%)
+    /// Allowed difference between a segment's path length and its DNP, as a
+    /// fraction of the DNP (0.35 = 35%). A path passes if it is within either
+    /// this or `absolute_length_tolerance`.
     #[pyo3(get, set)]
     pub length_tolerance: f64,
-    /// Absolute path length tolerance in meters
+    /// Allowed difference in meters between a segment's path length and its DNP.
     #[pyo3(get, set)]
     pub absolute_length_tolerance: f64,
-    /// Maximum search distance factor
+    /// A* gives up beyond this multiple of the DNP, or 500 m if that is larger.
     #[pyo3(get, set)]
     pub max_search_distance_factor: f64,
-    /// Scoring weight for distance (higher = distance matters more)
+    /// Candidate score weight for LRP-to-edge distance.
     #[pyo3(get, set)]
     pub distance_weight: f64,
-    /// Scoring weight for bearing difference
+    /// Candidate score weight for bearing difference.
     #[pyo3(get, set)]
     pub bearing_weight: f64,
-    /// Scoring weight for FRC difference
+    /// Candidate score weight for FRC difference.
     #[pyo3(get, set)]
     pub frc_weight: f64,
-    /// Scoring weight for FOW compatibility
+    /// Candidate score weight for FOW mismatch.
     #[pyo3(get, set)]
     pub fow_weight: f64,
-    /// Cost penalty in meters for traversing slip roads (ramps/links) in A* search.
-    /// Makes decoder prefer main roads over slip roads. Default 20m.
+    /// Extra A* cost in meters for each slip road (ramp or `*_link`) traversed,
+    /// so the path prefers main roads when lengths are similar.
     #[pyo3(get, set)]
     pub slip_road_cost_penalty: f64,
-    /// Cost penalty in meters for traversing access/local roads (residential, living_street,
-    /// service, track) in A* search. Makes decoder prefer tertiary over residential. Default 10m.
+    /// Extra A* cost in meters for each residential, living_street, service or
+    /// track edge traversed, so the path prefers tertiary and above.
     #[pyo3(get, set)]
     pub access_road_cost_penalty: f64,
-    /// Extend decoded paths so they start/end on valid (junction) nodes per OpenLR
-    /// Rule 4, folding the extra length into the offsets. Default True.
+    /// Extend the path at each end to the nearest junction (OpenLR Rule 4),
+    /// folding the added length into the offsets.
     #[pyo3(get, set)]
     pub snap_to_valid_nodes: bool,
-    /// Cap in meters on a terminal-node snap at each end. Default 25m.
+    /// Longest extension in meters that `snap_to_valid_nodes` may add at each end.
     #[pyo3(get, set)]
     pub max_snap_extension_m: f64,
 }
 
 #[pymethods]
 impl PyDecoderConfig {
-    /// Create a new decoder configuration
-    /// All parameters are optional and default to values optimized for cross-provider decoding
     #[new]
     #[pyo3(signature = (
         search_radius_m = 100.0,
@@ -286,31 +290,35 @@ impl From<&PyDecoderConfig> for DecoderConfig {
     }
 }
 
-/// Result of decoding an OpenLR reference
+/// A decoded line location. All distances are in meters.
 #[pyclass(name = "DecodedPath")]
 pub struct PyDecodedPath {
-    /// Stable edge IDs forming the path
+    /// Stable edge ids along the path, in travel order.
     #[pyo3(get)]
     pub edge_ids: Vec<u64>,
-    /// Total path length in meters
+    /// Length of the location along the path, from the first LRP to the last.
+    /// This excludes the offsets, and includes any start or end edge under 3%
+    /// of the path that was left out of `edge_ids`.
     #[pyo3(get)]
     pub length: f64,
-    /// Distance from start of first edge to first LRP projection (trim from start) in meters
+    /// Length to trim from the start of the path to where the location begins.
     #[pyo3(get)]
     pub positive_offset: f64,
-    /// Distance from last LRP projection to end of last edge (trim from end) in meters
+    /// Length to trim from the end of the path to where the location ends.
     #[pyo3(get)]
     pub negative_offset: f64,
-    /// Fraction along first edge where first LRP projects (0.0-1.0)
+    /// `positive_offset` as a fraction of the first edge. Exceeds 1.0 when a
+    /// terminal-node snap prepended edges; the meter offset is authoritative.
     #[pyo3(get)]
     pub positive_offset_fraction: f64,
-    /// Fraction along last edge where last LRP projects (0.0-1.0, measured from end)
+    /// `negative_offset` as a fraction of the last edge. Exceeds 1.0 when a
+    /// terminal-node snap appended edges; the meter offset is authoritative.
     #[pyo3(get)]
     pub negative_offset_fraction: f64,
-    /// The edge ID that covers the most distance in the decoded path
+    /// The edge covering the most of the location. Ties go to the earliest edge.
     #[pyo3(get)]
     pub primary_edge_id: u64,
-    /// The distance covered by the primary edge in meters
+    /// Length of the location that lies on `primary_edge_id`.
     #[pyo3(get)]
     pub primary_edge_coverage: f64,
 }
@@ -345,7 +353,11 @@ impl From<DecodedPath> for PyDecodedPath {
     }
 }
 
-/// OpenLR decoder for resolving location references to map paths
+/// Decodes base64 OpenLR line locations onto a `RoadNetwork`.
+///
+/// Args:
+///     network: The road network to decode against. It is shared, not copied.
+///     config: Decoder settings. Defaults to `DecoderConfig()`.
 #[pyclass(name = "Decoder")]
 pub struct PyDecoder {
     network: Arc<RoadNetwork>,
@@ -355,11 +367,6 @@ pub struct PyDecoder {
 
 #[pymethods]
 impl PyDecoder {
-    /// Create a new decoder for the given road network
-    ///
-    /// Args:
-    ///     network: The road network to decode against
-    ///     config: Optional decoder configuration
     #[new]
     #[pyo3(signature = (network, config = None))]
     fn new(network: &PyRoadNetwork, config: Option<PyRef<'_, PyDecoderConfig>>) -> Self {
@@ -375,18 +382,18 @@ impl PyDecoder {
         }
     }
 
-    /// Decode an OpenLR base64 string to a path
+    /// Decode one OpenLR line location. Releases the GIL while decoding.
     ///
     /// Args:
-    ///     openlr_base64: Base64-encoded OpenLR location reference
+    ///     openlr_base64: Base64-encoded OpenLR location reference.
     ///
     /// Returns:
-    ///     DecodedPath: The decoded path with edge IDs and length
+    ///     DecodedPath
     ///
     /// Raises:
-    ///     ValueError: If decoding fails
+    ///     ValueError: If the code is invalid or no matching path is found. The
+    ///         message says which.
     fn decode(&self, py: Python<'_>, openlr_base64: &str) -> PyResult<PyDecodedPath> {
-        // Decoding is pure Rust; release the GIL so other threads can run.
         py.detach(|| {
             let decoder =
                 Decoder::new(&self.network, &self.spatial).with_config(self.config.clone());
@@ -396,41 +403,38 @@ impl PyDecoder {
         .map_err(|e| PyValueError::new_err(decode_error_message(e)))
     }
 
-    /// Decode multiple OpenLR strings in parallel
+    /// Decode many OpenLR codes in parallel into one Arrow RecordBatch.
+    /// Releases the GIL while decoding.
     ///
     /// Args:
-    ///     openlr_codes: base64-encoded OpenLR location references, either as a
-    ///         list of str or as any Arrow string array (``string``,
-    ///         ``large_string`` or ``string_view``) exposed through the Arrow
-    ///         PyCapsule interface — a PyArrow ``Array``/``ChunkedArray`` or a
-    ///         Polars ``Series``. Arrow input is read zero-copy; null entries
-    ///         are reported as errors.
-    ///     explode: if True, return one row per (code, edge) instead of one row
-    ///         per code (see below).
+    ///     openlr_codes: Base64-encoded OpenLR location references, as a list of
+    ///         str or as an Arrow ``string``, ``large_string`` or ``string_view``
+    ///         array exposed through the Arrow PyCapsule interface, such as a
+    ///         PyArrow ``Array``/``ChunkedArray`` or a Polars ``Series``. Arrow
+    ///         input is read zero-copy. Null entries are reported as errors.
+    ///     explode: If True, return one row per (code, edge) instead of one row
+    ///         per code.
     ///
     /// Returns:
-    ///     PyArrow RecordBatch. With ``explode=False`` (default), one row per code:
-    ///     - edge_ids: list<uint64> - edge IDs for each decoded path
-    ///     - length: float64 - path length in meters
-    ///     - positive_offset: float64 - distance from first edge start to first LRP projection (meters)
-    ///     - negative_offset: float64 - distance from last LRP projection to last edge end (meters)
-    ///     - positive_offset_fraction: float64 - fraction along first edge where first LRP projects (0-1)
-    ///     - negative_offset_fraction: float64 - fraction along last edge from last LRP to edge end (0-1)
-    ///     - primary_edge_id: uint64 - edge ID covering the most distance
-    ///     - primary_edge_coverage: float64 - distance covered by primary edge in meters
-    ///     - error: string (nullable) - error message if decode failed, null if succeeded
+    ///     pyarrow.RecordBatch. Columns named as on `DecodedPath` mean the same
+    ///     thing. With ``explode=False``, one row per code:
+    ///     - edge_ids: list<uint64>, empty on failure
+    ///     - length, positive_offset, negative_offset, positive_offset_fraction,
+    ///       negative_offset_fraction, primary_edge_coverage: float64
+    ///     - primary_edge_id: uint64
+    ///     - error: string, null on success. The other columns are null on failure.
     ///
-    ///     With ``explode=True``, one row per edge of each decoded path, and a
-    ///     single row with null edge columns for each failed code:
-    ///     - code_index: uint64 - position of the code in ``openlr_codes``
-    ///     - edge_id: uint64 - edge ID
-    ///     - edge_position: uint32 - 0-based position of the edge in the path
-    ///     - is_primary: bool - whether this is the path's primary edge
-    ///     - offset_fraction: float64 - fraction (0-1) of this edge outside the
-    ///       location; the meter offsets are spread from each end of the path,
-    ///       so edges added by a terminal-node snap are 1.0
-    ///     - length: float64 - path length in meters
-    ///     - error: string (nullable) - error message if decode failed
+    ///     With ``explode=True``, one row per edge of each path, and a single row
+    ///     with null edge columns for a code that has no edges (such as a failed one):
+    ///     - code_index: uint64, position of the code in ``openlr_codes``
+    ///     - edge_id: uint64
+    ///     - edge_position: uint32, 0-based position of the edge in the path
+    ///     - is_primary: bool, whether this is the path's ``primary_edge_id``
+    ///     - offset_fraction: float64, fraction (0-1) of this edge outside the
+    ///       location. The meter offsets are consumed edge by edge from each end
+    ///       of the path, so edges added by a terminal-node snap are 1.0.
+    ///     - length: float64
+    ///     - error: string, null on success
     #[pyo3(signature = (openlr_codes, *, explode = false))]
     fn decode_batch(
         &self,
@@ -454,8 +458,8 @@ impl PyDecoder {
                 })
             }
             CodesInput::Arrow(input) => {
-                // Pull the chunks with the GIL held (the stream may be produced in
-                // Python); importing them is zero-copy.
+                // Import the chunks (zero-copy) with the GIL held, since a stream
+                // may be produced by Python code.
                 let chunks = input
                     .into_chunked_array()
                     .map_err(|e| {
@@ -473,7 +477,6 @@ impl PyDecoder {
         }
         .map_err(|e| PyValueError::new_err(format!("Failed to create RecordBatch: {}", e)))?;
 
-        // Convert to PyArrow via pyo3-arrow
         PyRecordBatch::new(batch)
             .into_pyarrow(py)
             .map(|b| b.unbind())
@@ -508,7 +511,9 @@ fn string_values(array: &dyn Array) -> PyResult<StrIter<'_>> {
     }
 }
 
-/// Get the expected PyArrow schema for road network parquet files
+/// The PyArrow schema `RoadNetwork.from_parquet` and `RoadNetwork.from_arrow`
+/// expect. `lanes` and `geometry` are optional, and `geometry` may also be WKT
+/// or GeoArrow.
 #[pyfunction]
 fn road_network_schema(py: Python<'_>) -> PyResult<Py<PyAny>> {
     let schema = Arc::new(crate::loader::road_network_schema());
@@ -518,7 +523,6 @@ fn road_network_schema(py: Python<'_>) -> PyResult<Py<PyAny>> {
         .map_err(|e| PyValueError::new_err(format!("Failed to convert schema: {}", e)))
 }
 
-/// Python module for openlr_decoder
 #[pymodule]
 fn _openlr_decoder(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyRoadNetwork>()?;
