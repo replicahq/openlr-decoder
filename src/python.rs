@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::{Array, AsArray};
-use pyo3::exceptions::{PyTypeError, PyValueError};
+use pyo3::exceptions::{PyOSError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::Py;
 use pyo3_arrow::input::AnyArray;
@@ -47,9 +47,13 @@ impl PyRoadNetwork {
             .detach(|| load_network_from_parquet(Path::new(path)))
             .map_err(|e| {
                 let message = format!("Failed to load network: {e:#}");
-                // PyErr::from(io::Error) picks the OSError subclass for the kind.
+                // OSError(errno, strerror, filename) picks the subclass, such as
+                // FileNotFoundError, and fills errno and filename.
                 match e.chain().find_map(|c| c.downcast_ref::<std::io::Error>()) {
-                    Some(io) => std::io::Error::new(io.kind(), message).into(),
+                    Some(io) => match io.raw_os_error() {
+                        Some(errno) => PyOSError::new_err((errno, message, path.to_string())),
+                        None => std::io::Error::new(io.kind(), message).into(),
+                    },
                     None => PyValueError::new_err(message),
                 }
             })?;
