@@ -43,17 +43,20 @@ enum WktSource<'a> {
 
 /// The Arrow schema the loader reads. Extra columns are ignored.
 ///
-/// - `stableEdgeId` (UInt64), `startOsmNode`/`endOsmNode` (Int64): rows with a
-///   null in any of these are skipped. Node ids are OSM nodes, so edges split
-///   at barriers still connect.
+/// - `stableEdgeId` (UInt64), `startOsmNode`/`endOsmNode` (Int64): node ids are
+///   OSM nodes, so edges split at barriers still connect.
 /// - `startLat`, `startLon`, `endLat`, `endLon` (Float64), degrees.
+///
+/// Rows with a null in any of those seven columns are skipped.
 /// - `highway`: OSM tag, mapped by [`Frc::from_osm_highway`] and
 ///   [`Fow::from_osm_tags`]. Any string type (String, LargeString, StringView).
-/// - `lanes` (Int64, optional): only used for FOW. Other types are ignored.
+/// - `lanes` (optional): only used for FOW. Any type Arrow can cast to Int64;
+///   values that don't cast, or fall outside 0–255, count as unknown.
 /// - `geometry` (optional): WKB as any binary type, WKT as any string type, or
-///   GeoArrow `geoarrow.linestring`. Only the first part of a MultiLineString
-///   is kept. Missing or unparseable geometry falls back to the straight line
-///   between the endpoints.
+///   GeoArrow `geoarrow.linestring`. A MultiLineString's parts are joined head
+///   to tail. Missing or unparseable geometry, or a MultiLineString whose
+///   parts don't connect, falls back to the straight line between the
+///   endpoints.
 pub fn road_network_schema() -> Schema {
     Schema::new(vec![
         Field::new("stableEdgeId", DataType::UInt64, false),
@@ -206,9 +209,24 @@ fn process_batch(
         ));
     }
 
-    let lanes = batch
+    // Cast so Int32 or string lane columns work too; values that don't parse
+    // become null.
+    let lanes_i64 = batch
         .column_by_name("lanes")
+        .and_then(|c| arrow::compute::cast(c, &DataType::Int64).ok());
+    let lanes = lanes_i64
+        .as_ref()
         .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
+
+    let skip_row = |row: usize| {
+        stable_edge_id.is_null(row)
+            || start_vertex.is_null(row)
+            || end_vertex.is_null(row)
+            || start_lat.is_null(row)
+            || start_lon.is_null(row)
+            || end_lat.is_null(row)
+            || end_lon.is_null(row)
+    };
 
     let geometry_format = detect_geometry_format(batch);
 
@@ -217,7 +235,7 @@ fn process_batch(
     // seen for a node id wins.
     let mut batch_nodes: AHashMap<i64, Point<f64>> = AHashMap::new();
     for row in 0..batch.num_rows() {
-        if stable_edge_id.is_null(row) || start_vertex.is_null(row) || end_vertex.is_null(row) {
+        if skip_row(row) {
             continue;
         }
         let sv_id = start_vertex.value(row);
@@ -243,7 +261,7 @@ fn process_batch(
     let pending_edges: Vec<Option<PendingEdge>> = (0..batch.num_rows())
         .into_par_iter()
         .map(|row| {
-            if stable_edge_id.is_null(row) || start_vertex.is_null(row) || end_vertex.is_null(row) {
+            if skip_row(row) {
                 return None;
             }
 
@@ -278,13 +296,9 @@ fn process_batch(
             };
             let frc = Frc::from_osm_highway(hw_tag);
 
-            let lane_count = lanes.and_then(|l| {
-                if l.is_null(row) {
-                    None
-                } else {
-                    Some(l.value(row) as u8)
-                }
-            });
+            let lane_count = lanes
+                .filter(|l| !l.is_null(row))
+                .and_then(|l| u8::try_from(l.value(row)).ok());
             let fow = Fow::from_osm_tags(hw_tag, None, None, lane_count);
 
             let fallback = || LineString::from(vec![(sv_lon, sv_lat), (ev_lon, ev_lat)]);
@@ -445,39 +459,72 @@ fn parse_geoarrow_linestring(arr: &LineStringArray, row: usize) -> Option<LineSt
     Some(LineString::from(coords))
 }
 
-/// Keeps only the first part of a MultiLineString; other geometry types give `None`.
+/// Joins a MultiLineString's parts head to tail, in storage order, reversing
+/// a part when that makes it connect. `None` if the parts don't chain that
+/// way, or for any other geometry type, so the caller falls back to a straight
+/// line rather than a geometry that jumps or doubles back.
 fn extract_linestring(geom: geo::Geometry<f64>) -> Option<LineString<f64>> {
     match geom {
         geo::Geometry::LineString(ls) => Some(ls),
-        geo::Geometry::MultiLineString(mls) => mls.0.into_iter().next(),
+        geo::Geometry::MultiLineString(mls) => {
+            let mut parts = mls.into_iter().map(|p| p.0).filter(|p| !p.is_empty());
+            let mut coords = parts.next()?;
+            let mut first_join = true;
+            for mut part in parts {
+                let end = *coords.last().unwrap();
+                let (head, tail) = (part[0], *part.last().unwrap());
+                if head == end {
+                } else if tail == end {
+                    part.reverse();
+                } else if first_join && coords[0] == head {
+                    coords.reverse();
+                } else if first_join && coords[0] == tail {
+                    coords.reverse();
+                    part.reverse();
+                } else {
+                    return None;
+                }
+                coords.extend(part.into_iter().skip(1));
+                first_join = false;
+            }
+            Some(LineString::new(coords))
+        }
         _ => None,
     }
 }
 
-/// Read base64 OpenLR codes from the `openlr` column of a parquet file,
-/// skipping nulls. Returns an empty list if the column is missing or is not
-/// a plain String array.
+/// Read base64 OpenLR codes from the `openlr` column (any string type) of a
+/// parquet file, skipping nulls. Dictionary-encoded strings work too. Errors if
+/// the column is missing or not a string.
 pub fn load_openlr_codes(path: &Path) -> Result<Vec<String>> {
     let file = File::open(path).context("Failed to open parquet file")?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
-    let reader = builder.build()?;
+
+    // Check the schema, not each batch, so a file with no rows errors too.
+    let field = builder
+        .schema()
+        .field_with_name("openlr")
+        .map_err(|_| anyhow!("Missing column 'openlr'"))?;
+    let is_string =
+        |t: &DataType| matches!(t, DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View);
+    let ok = match field.data_type() {
+        DataType::Dictionary(_, values) => is_string(values),
+        t => is_string(t),
+    };
+    if !ok {
+        return Err(anyhow!(
+            "Column 'openlr' has type {:?}, expected a string type",
+            field.data_type()
+        ));
+    }
 
     let mut codes = Vec::new();
-
-    for batch_result in reader {
+    for batch_result in builder.build()? {
         let batch = batch_result?;
-
-        let openlr_col = batch
-            .column_by_name("openlr")
-            .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-
-        if let Some(col) = openlr_col {
-            for i in 0..col.len() {
-                if !col.is_null(i) {
-                    codes.push(col.value(i).to_string());
-                }
-            }
-        }
+        let col = batch.column_by_name("openlr").unwrap();
+        let col = arrow::compute::cast(col, &DataType::Utf8)?;
+        let col = col.as_any().downcast_ref::<StringArray>().unwrap();
+        codes.extend(col.iter().flatten().map(str::to_string));
     }
 
     Ok(codes)
@@ -710,5 +757,142 @@ mod tests {
             err_msg.contains("startOsmNode"),
             "Error should mention the bad column, got: {err_msg}"
         );
+    }
+
+    /// A two-row batch of `primary` edges, with `lanes` appended when given.
+    fn edge_batch(start_lat: Vec<Option<f64>>, lanes: Option<ArrayRef>) -> RecordBatch {
+        use arrow::datatypes::{Field, Schema};
+
+        let mut fields = vec![
+            Field::new("stableEdgeId", DataType::UInt64, false),
+            Field::new("startOsmNode", DataType::Int64, false),
+            Field::new("endOsmNode", DataType::Int64, false),
+            Field::new("startLat", DataType::Float64, true),
+            Field::new("startLon", DataType::Float64, false),
+            Field::new("endLat", DataType::Float64, false),
+            Field::new("endLon", DataType::Float64, false),
+            Field::new("highway", DataType::Utf8, false),
+        ];
+        let mut columns: Vec<ArrayRef> = vec![
+            Arc::new(UInt64Array::from(vec![1u64, 2])),
+            Arc::new(Int64Array::from(vec![10i64, 20])),
+            Arc::new(Int64Array::from(vec![11i64, 21])),
+            Arc::new(Float64Array::from(start_lat)),
+            Arc::new(Float64Array::from(vec![-94.0, -94.1])),
+            Arc::new(Float64Array::from(vec![39.001, 39.101])),
+            Arc::new(Float64Array::from(vec![-94.0, -94.1])),
+            Arc::new(StringArray::from(vec!["primary", "primary"])),
+        ];
+        if let Some(lanes) = lanes {
+            fields.push(Field::new("lanes", lanes.data_type().clone(), true));
+            columns.push(lanes);
+        }
+        RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap()
+    }
+
+    fn load(batch: &RecordBatch) -> RoadNetwork {
+        let mut network = RoadNetwork::new();
+        process_batch(batch, &mut network, &mut Vec::new()).unwrap();
+        network
+    }
+
+    #[test]
+    fn test_null_coordinate_row_skipped() {
+        let network = load(&edge_batch(vec![Some(39.0), None], None));
+        assert_eq!(network.graph.edge_count(), 1);
+        assert_eq!(network.graph.node_count(), 2);
+    }
+
+    #[test]
+    fn test_lanes_any_integer_type_and_out_of_range() {
+        use arrow::array::Int32Array;
+
+        // 4 lanes on a primary road means a dual carriageway; -1 must not wrap
+        // to 255 and do the same.
+        let lanes: ArrayRef = Arc::new(Int32Array::from(vec![4, -1]));
+        let network = load(&edge_batch(vec![Some(39.0), Some(39.1)], Some(lanes)));
+        let fow = |id| {
+            let idx = network.edge_id_to_index.as_ref().unwrap()[&id];
+            network.edge(idx).unwrap().fow
+        };
+        assert_eq!(fow(1), Fow::MultipleCarriageway);
+        assert_eq!(fow(2), Fow::SingleCarriageway);
+    }
+
+    #[test]
+    fn test_parse_wkt_multilinestring_joins_parts() {
+        let xs = |wkt| {
+            parse_wkt_linestring(wkt).map(|ls| ls.coords().map(|c| c.x).collect::<Vec<f64>>())
+        };
+        let joined = Some(vec![0.0, 1.0, 2.0, 3.0]);
+        assert_eq!(
+            xs("MULTILINESTRING((0 0, 1 1), (1 1, 2 2), (2 2, 3 3))"),
+            joined
+        );
+        // Reversed parts, including the first.
+        assert_eq!(
+            xs("MULTILINESTRING((0 0, 1 1), (2 2, 1 1), (2 2, 3 3))"),
+            joined
+        );
+        assert_eq!(
+            xs("MULTILINESTRING((1 1, 0 0), (1 1, 2 2), (3 3, 2 2))"),
+            joined
+        );
+        // A gap or out-of-order parts: no geometry, so the loader uses a straight line.
+        assert_eq!(xs("MULTILINESTRING((0 0, 1 1), (2 2, 3 3))"), None);
+        assert_eq!(
+            xs("MULTILINESTRING((0 0, 1 1), (2 2, 3 3), (1 1, 2 2))"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_load_openlr_codes_string_types() {
+        use arrow::array::StringViewArray;
+        use arrow::datatypes::{Field, Schema};
+        use parquet::arrow::ArrowWriter;
+
+        let path =
+            std::env::temp_dir().join(format!("openlr_codes_{}.parquet", std::process::id()));
+        let write = |col: ArrayRef| {
+            let schema = Schema::new(vec![Field::new("openlr", col.data_type().clone(), true)]);
+            let batch = RecordBatch::try_new(Arc::new(schema), vec![col]).unwrap();
+            let mut writer =
+                ArrowWriter::try_new(File::create(&path).unwrap(), batch.schema(), None).unwrap();
+            writer.write(&batch).unwrap();
+            writer.close().unwrap();
+        };
+
+        let dict: arrow::array::DictionaryArray<arrow::datatypes::Int32Type> =
+            vec![Some("a"), None, Some("b")].into_iter().collect();
+        for col in [
+            Arc::new(StringArray::from(vec![Some("a"), None, Some("b")])) as ArrayRef,
+            Arc::new(LargeStringArray::from(vec![Some("a"), None, Some("b")])),
+            Arc::new(StringViewArray::from(vec![Some("a"), None, Some("b")])),
+            Arc::new(dict),
+        ] {
+            let ty = col.data_type().clone();
+            write(col);
+            assert_eq!(load_openlr_codes(&path).unwrap(), vec!["a", "b"], "{ty:?}");
+        }
+
+        write(Arc::new(Int64Array::from(vec![1i64])));
+        assert!(load_openlr_codes(&path).is_err());
+        // No rows and no openlr column: still an error.
+        let empty = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "other",
+                DataType::Int64,
+                true,
+            )])),
+            vec![Arc::new(Int64Array::from(Vec::<i64>::new()))],
+        )
+        .unwrap();
+        let mut writer =
+            ArrowWriter::try_new(File::create(&path).unwrap(), empty.schema(), None).unwrap();
+        writer.write(&empty).unwrap();
+        writer.close().unwrap();
+        assert!(load_openlr_codes(&path).is_err());
+        std::fs::remove_file(&path).ok();
     }
 }
