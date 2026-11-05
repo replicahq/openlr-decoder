@@ -1,3 +1,9 @@
+//! Directed road graph. Nodes are junctions and shape breaks with an OSM node
+//! id; edges are road segments with geometry, length and road class.
+//!
+//! [`Frc`] and [`Fow`] are OpenLR's road-class attributes, inferred from OSM
+//! tags.
+
 use geo::{Haversine, Length, LineString, Point};
 use petgraph::graph::{DiGraph, EdgeIndex, NodeIndex};
 use petgraph::visit::EdgeRef;
@@ -163,9 +169,8 @@ pub struct Edge {
 }
 
 impl Edge {
-    /// Build an edge with its length computed from `geometry`, as the loader
-    /// does. Only tests use this.
-    #[allow(dead_code)]
+    /// An edge with its length computed from `geometry`, as the loader does,
+    /// and `is_access_road` false.
     pub fn new(id: u64, geometry: LineString<f64>, frc: Frc, fow: Fow) -> Self {
         let length_m = Haversine.length(&geometry);
 
@@ -284,58 +289,39 @@ impl RoadNetwork {
     pub fn is_valid_node(&self, node_idx: NodeIndex) -> bool {
         use petgraph::Direction;
 
-        let mut in_deg = 0usize;
-        let mut out_deg = 0usize;
-        // (neighbour, edges in, edges out). A third neighbour means a junction.
-        let mut neighbours: Vec<(NodeIndex, usize, usize)> = Vec::with_capacity(3);
+        // (neighbour, edges in from it, edges out to it)
+        let mut neighbours: Vec<(NodeIndex, usize, usize)> = Vec::with_capacity(2);
+        let incoming = self
+            .graph
+            .edges_directed(node_idx, Direction::Incoming)
+            .map(|e| (e.source(), true));
+        let outgoing = self.graph.edges(node_idx).map(|e| (e.target(), false));
 
-        let mut record = |other: NodeIndex, incoming: bool| -> bool {
+        for (other, is_incoming) in incoming.chain(outgoing) {
             if other == node_idx {
-                return false; // self-loop
+                return true; // a self-loop is a choice
             }
-            match neighbours.iter_mut().find(|(n, _, _)| *n == other) {
-                Some(entry) => {
-                    if incoming {
-                        entry.1 += 1;
-                    } else {
-                        entry.2 += 1;
-                    }
-                }
+            let entry = match neighbours.iter().position(|n| n.0 == other) {
+                Some(i) => &mut neighbours[i],
+                None if neighbours.len() == 2 => return true, // a third neighbour
                 None => {
-                    if neighbours.len() >= 2 {
-                        return false;
-                    }
-                    neighbours.push(if incoming {
-                        (other, 1, 0)
-                    } else {
-                        (other, 0, 1)
-                    });
+                    neighbours.push((other, 0, 0));
+                    neighbours.last_mut().unwrap()
                 }
-            }
-            true
-        };
-
-        for e in self.graph.edges_directed(node_idx, Direction::Incoming) {
-            in_deg += 1;
-            if !record(e.source(), true) {
-                return true;
-            }
-        }
-        for e in self.graph.edges_directed(node_idx, Direction::Outgoing) {
-            out_deg += 1;
-            if !record(e.target(), false) {
-                return true;
+            };
+            if is_incoming {
+                entry.1 += 1;
+            } else {
+                entry.2 += 1;
             }
         }
 
-        if neighbours.len() != 2 || in_deg != out_deg {
-            return true;
-        }
-        // Parallel edges to the same neighbour are a real choice.
-        if neighbours.iter().any(|(_, i, o)| *i > 1 || *o > 1) {
-            return true;
-        }
-        false
+        let ins: usize = neighbours.iter().map(|n| n.1).sum();
+        let outs: usize = neighbours.iter().map(|n| n.2).sum();
+        let pass_through = neighbours.len() == 2
+            && ins == outs
+            && neighbours.iter().all(|&(_, i, o)| i <= 1 && o <= 1);
+        !pass_through
     }
 
     /// At an invalid node, the one exit that isn't a U-turn after arriving via
@@ -449,48 +435,40 @@ mod tests {
         );
     }
 
-    fn ls(a: (f64, f64), b: (f64, f64)) -> LineString<f64> {
-        LineString::from(vec![a, b])
-    }
-
-    /// Build a small network: A→X→B one-way through-road, plus a junction J
-    /// with three neighbours, and a dead end D hanging off B.
+    /// A→X→B one-way, then two-way B–J, J–C and B–D. X and J are pass-through
+    /// nodes; B is a junction; A, C and D are ends.
     fn topo_network() -> (RoadNetwork, HashMap<&'static str, NodeIndex>) {
-        let mut net = RoadNetwork::new();
-        let pts: [(&str, i64, (f64, f64)); 6] = [
-            ("A", 1, (0.0, 0.0)),
-            ("X", 2, (0.001, 0.0)),
-            ("B", 3, (0.002, 0.0)),
-            ("J", 4, (0.003, 0.0)),
-            ("C", 5, (0.003, 0.001)),
-            ("D", 6, (0.002, -0.001)),
+        let nodes = [
+            ("A", (0.0, 0.0)),
+            ("X", (0.001, 0.0)),
+            ("B", (0.002, 0.0)),
+            ("J", (0.003, 0.0)),
+            ("C", (0.003, 0.001)),
+            ("D", (0.002, -0.001)),
         ];
+        let edges = [
+            ("A", "X"),
+            ("X", "B"),
+            ("B", "J"),
+            ("J", "B"),
+            ("J", "C"),
+            ("C", "J"),
+            ("B", "D"),
+            ("D", "B"),
+        ];
+
+        let mut net = RoadNetwork::new();
         let mut idx = HashMap::new();
-        for (name, id, (x, y)) in pts {
-            idx.insert(name, net.get_or_add_node(id, Point::new(x, y)));
+        let osm_id = |name| nodes.iter().position(|n| n.0 == name).unwrap() as i64;
+        let coord = |name| nodes[osm_id(name) as usize].1;
+        for (name, (x, y)) in nodes {
+            idx.insert(name, net.get_or_add_node(osm_id(name), Point::new(x, y)));
         }
-        let p = |n: &str| pts.iter().find(|q| q.0 == n).unwrap().2;
-        let mut eid = 0;
-        let mut add = |net: &mut RoadNetwork, a: &str, b: &str| {
-            eid += 1;
-            let (ia, ib) = (
-                pts.iter().find(|q| q.0 == a).unwrap().1,
-                pts.iter().find(|q| q.0 == b).unwrap().1,
-            );
-            net.add_edge(
-                ia,
-                ib,
-                Edge::new(eid, ls(p(a), p(b)), Frc::Frc4, Fow::SingleCarriageway),
-            )
-        };
-        add(&mut net, "A", "X"); // one-way A→X
-        add(&mut net, "X", "B"); // one-way X→B
-        add(&mut net, "B", "J");
-        add(&mut net, "J", "B");
-        add(&mut net, "J", "C");
-        add(&mut net, "C", "J");
-        add(&mut net, "B", "D"); // dead-end spur, two-way
-        add(&mut net, "D", "B");
+        for (id, (a, b)) in edges.into_iter().enumerate() {
+            let geom = LineString::from(vec![coord(a), coord(b)]);
+            let edge = Edge::new(id as u64, geom, Frc::Frc4, Fow::SingleCarriageway);
+            net.add_edge(osm_id(a), osm_id(b), edge);
+        }
         (net, idx)
     }
 
