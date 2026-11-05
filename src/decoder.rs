@@ -923,22 +923,23 @@ impl<'a> Decoder<'a> {
             return Ok(result);
         }
 
-        // Try pairs in order of (score + 1) products, which ranks a pair down
-        // hard when either candidate is poor. The +1 keeps a perfect 0 score from
-        // zeroing the product.
+        // A path scores its two candidates' scores plus a length penalty, so
+        // pairs are tried by that sum, and stop once it can't beat the best path.
         let mut pairs: Vec<(usize, usize, f64)> = Vec::with_capacity(100);
         for (i, start_cand) in start_candidates.iter().enumerate().take(10) {
             for (j, end_cand) in end_candidates.iter().enumerate().take(10) {
-                let combined = (start_cand.score + 1.0) * (end_cand.score + 1.0);
-                pairs.push((i, j, combined));
+                pairs.push((i, j, start_cand.score + end_cand.score));
             }
         }
-        pairs.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap());
+        pairs.sort_by(|a, b| a.2.total_cmp(&b.2));
 
         let mut best_path: Option<PathResult> = None;
         let mut best_score = f64::MAX;
 
-        for (start_idx, end_idx, _combined_score) in pairs.iter().copied() {
+        for (start_idx, end_idx, pair_score) in pairs.iter().copied() {
+            if pair_score >= best_score {
+                break;
+            }
             let start_cand = &start_candidates[start_idx];
             let end_cand = &end_candidates[end_idx];
 
@@ -997,10 +998,6 @@ impl<'a> Decoder<'a> {
                                     end_offset_m: edge.length_m
                                         * (1.0 - end_cand.projection_fraction),
                                 });
-
-                                if length_diff < 0.1 {
-                                    break;
-                                }
                             }
                         }
                     }
@@ -1097,7 +1094,6 @@ impl<'a> Decoder<'a> {
                 });
             }
 
-            // Final ranking is additive, unlike the multiplicative pair order.
             let length_diff = (path_cost - expected_distance).abs() / expected_distance.max(1.0);
             let score = start_cand.score + end_cand.score + length_diff;
 
@@ -1110,12 +1106,6 @@ impl<'a> Decoder<'a> {
                     start_offset_m,
                     end_offset_m,
                 });
-
-                // Pairs come best-first, so stop at the first improvement whose
-                // length is within 10% of the DNP.
-                if length_diff < 0.1 {
-                    break;
-                }
             }
         }
 
@@ -1931,6 +1921,46 @@ mod tests {
             None,
         );
         assert!(result.is_err(), "{result:?}");
+    }
+
+    /// Two disconnected 100 m edges, each with an LRP pair spanning 50 m. Edge 1's
+    /// pair (scores 0 and 0.5) has the better product of (score + 1), 1.5 against
+    /// 1.51, which used to decide; edge 2's (0.23 and 0.23) has the better total,
+    /// 0.46 against 0.5.
+    #[test]
+    fn test_best_pair_by_total_score() {
+        let (network, spatial) = TestNetworkBuilder::new()
+            .add_node(1, 0.0, 0.0)
+            .add_node(2, 0.0009, 0.0)
+            .add_node(3, 0.0, 0.01)
+            .add_node(4, 0.0009, 0.01)
+            .add_edge(100, 1, 2, 100.0, Frc::Frc3, Fow::SingleCarriageway)
+            .add_edge(101, 3, 4, 100.0, Frc::Frc3, Fow::SingleCarriageway)
+            .build();
+        let ids = network.edge_id_to_index.as_ref().unwrap();
+        let (e1, e2) = (ids[&100], ids[&101]);
+        let decoder = Decoder::new(&network, &spatial);
+
+        // 20 m away, so try_same_edge_solution passes them over.
+        let cand = |edge_idx, projection_fraction, score| Candidate {
+            edge_idx,
+            distance_m: 20.0,
+            bearing_diff: 0.0,
+            frc_diff: 0,
+            fow_score: 1.0,
+            score,
+            projection_fraction,
+        };
+        let path = decoder
+            .find_best_path(
+                &[cand(e1, 0.1, 0.0), cand(e2, 0.1, 0.23)],
+                &[cand(e1, 0.6, 0.5), cand(e2, 0.6, 0.23)],
+                50.0,
+                0,
+                None,
+            )
+            .unwrap();
+        assert_eq!(path.edges, vec![e2]);
     }
 
     /// Network for terminal-snap tests (all edges one-way, west→east):
