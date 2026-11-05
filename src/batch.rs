@@ -161,7 +161,7 @@ impl Sink for NestedSink {
                 self.error.append_null();
             }
             Err(message) => {
-                // Empty list for failed decodes
+                // An empty list, not null.
                 self.edge_ids.append(true);
                 self.length.append_null();
                 self.positive_offset.append_null();
@@ -269,9 +269,8 @@ impl Sink for ExplodedSink {
 
 /// Fraction (0-1) of each edge in `path` that lies outside the location.
 ///
-/// Each meter offset is consumed edge by edge from its end of the path, so an
-/// offset that spans several edges (after a terminal-node snap) trims all of them,
-/// not just the first/last.
+/// Each meter offset is consumed edge by edge from its end of the path, so after
+/// a terminal-node snap one offset can trim several edges.
 fn edge_offset_fractions(path: &DecodedPath) -> Vec<f64> {
     fn trim<'a>(offset_m: f64, edges: impl Iterator<Item = (&'a mut f64, &'a f64)>) {
         let mut remaining = offset_m;

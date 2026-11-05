@@ -2,11 +2,8 @@ use geo::{Coord, Distance, Haversine, LineString, Point};
 use petgraph::graph::EdgeIndex;
 use rstar::{RTree, RTreeObject, AABB};
 
-/// Envelope wrapper for an edge's bounding box in the R-tree.
-///
-/// This struct intentionally does NOT store the edge geometry to avoid
-/// duplicating it (the canonical copy lives in `Edge` in the graph).
-/// Precise distance calculations look up geometry via `network.edge()`.
+/// An edge's bounding box, in degrees. The geometry stays in the graph's
+/// [`Edge`](crate::graph::Edge) so it isn't stored twice.
 #[derive(Debug, Clone)]
 pub struct EdgeEnvelope {
     pub edge_idx: EdgeIndex,
@@ -48,24 +45,21 @@ impl RTreeObject for EdgeEnvelope {
     }
 }
 
-/// Spatial index for fast edge lookup
 pub struct SpatialIndex {
     rtree: RTree<EdgeEnvelope>,
 }
 
 impl SpatialIndex {
-    /// Build a new spatial index from edge envelopes
     pub fn new(edges: Vec<EdgeEnvelope>) -> Self {
         SpatialIndex {
             rtree: RTree::bulk_load(edges),
         }
     }
 
-    /// Find all edges within a bounding box (degrees)
-    /// The bbox is expanded from a center point by radius_m meters
+    /// Edges whose bounding box intersects a box extending `radius_m` from
+    /// `center` in each direction. The meters-to-degrees conversion is approximate,
+    /// so callers needing an exact radius should pad it and filter by true distance.
     pub fn find_nearby(&self, center: Point<f64>, radius_m: f64) -> Vec<&EdgeEnvelope> {
-        // Approximate degrees from meters (rough, ~111km per degree at equator)
-        // Adjust for latitude
         let lat_rad = center.y().to_radians();
         let meters_per_deg_lat = 111_132.0;
         let meters_per_deg_lon = 111_132.0 * lat_rad.cos();
@@ -115,8 +109,7 @@ impl SpatialIndex {
     }
 }
 
-/// Calculate bearing difference, accounting for wraparound
-/// Returns value in 0-180 range
+/// Smallest angle between two bearings, in [0, 180]. Inputs must be in [0, 360).
 pub fn bearing_difference(b1: f64, b2: f64) -> f64 {
     let diff = (b1 - b2).abs();
     if diff > 180.0 {
@@ -126,7 +119,8 @@ pub fn bearing_difference(b1: f64, b2: f64) -> f64 {
     }
 }
 
-/// Project a point onto a line and return the fraction along the line (0.0 to 1.0)
+/// Fraction of the line's length, in [0, 1], at which `point` projects onto it.
+/// Returns 0.0 for a degenerate line.
 pub fn project_point_to_line_fraction(point: Point<f64>, line: &LineString<f64>) -> f64 {
     let coords: Vec<Coord<f64>> = line.coords().cloned().collect();
     if coords.len() < 2 {
@@ -134,7 +128,7 @@ pub fn project_point_to_line_fraction(point: Point<f64>, line: &LineString<f64>)
     }
 
     let mut total_length = 0.0;
-    let mut segments: Vec<(f64, f64)> = Vec::new(); // (segment_start_dist, segment_length)
+    let mut segments: Vec<(f64, f64)> = Vec::new(); // (distance to segment start, length)
 
     for i in 0..coords.len() - 1 {
         let p1 = Point::new(coords[i].x, coords[i].y);
@@ -148,7 +142,6 @@ pub fn project_point_to_line_fraction(point: Point<f64>, line: &LineString<f64>)
         return 0.0;
     }
 
-    // Find closest segment and position
     let mut best_dist = f64::MAX;
     let mut best_fraction = 0.0;
 
@@ -156,13 +149,11 @@ pub fn project_point_to_line_fraction(point: Point<f64>, line: &LineString<f64>)
         let p1 = Point::new(coords[i].x, coords[i].y);
         let p2 = Point::new(coords[i + 1].x, coords[i + 1].y);
 
-        // Project point onto segment
         let (closest, frac) = project_point_to_segment(point, p1, p2);
         let dist = Haversine.distance(point, closest);
 
         if dist < best_dist {
             best_dist = dist;
-            // Calculate overall fraction
             let dist_along = seg_start + frac * seg_len;
             best_fraction = dist_along / total_length;
         }
@@ -194,9 +185,8 @@ fn wrap_lon(x: f64) -> f64 {
     }
 }
 
-/// Project a point onto a line segment, returns (closest_point, fraction_along_segment).
-/// Longitude deltas are wrapped so segments and query points near the antimeridian
-/// project correctly.
+/// Closest point on segment `p1`–`p2` and its fraction along the segment. The
+/// projection is planar in degrees, with longitudes wrapped via [`wrap_lon_delta`].
 fn project_point_to_segment(
     point: Point<f64>,
     p1: Point<f64>,
@@ -223,19 +213,19 @@ pub const BEARDIST_M: f64 = 20.0;
 /// Which side of the projection point the bearing chord is taken from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BearingDirection {
-    /// Chord from the projection point to BEARDIST further along the line
-    /// (first / intermediate LRPs, whose attributes describe the outgoing line).
+    /// The [`BEARDIST_M`] after the projection point. Used for every LRP but the last,
+    /// whose attributes describe the outgoing line.
     Forward,
-    /// Chord from BEARDIST before the projection point up to it
-    /// (last LRP, whose attributes describe the incoming line).
+    /// The [`BEARDIST_M`] leading up to the projection point, for the last LRP. The
+    /// bearing still points in the travel direction, as HERE encodes it; the spec
+    /// points it back along the line.
     Backward,
 }
 
-/// Bearing (0-360, in travel direction) of the line at the point closest to `point`,
-/// measured over a BEARDIST chord per OpenLR §5.2.4 rather than a single segment.
-/// If the line ends within BEARDIST in the requested direction the chord is clamped to
-/// the line end; if that leaves no usable chord the other direction is tried, and a
-/// degenerate line falls back to 0.0.
+/// Bearing in degrees [0, 360), in the travel direction, of the chord in `direction`
+/// from where `point` projects onto `line`. The chord is cut short at the line's
+/// end; if that leaves under 0.5 m, the other direction is used, and if both are
+/// that short the result is 0.0.
 pub fn bearing_at_projection(
     point: Point<f64>,
     line: &LineString<f64>,
@@ -248,7 +238,7 @@ pub fn bearing_at_projection(
         return 0.0;
     }
 
-    // Cumulative distance at each vertex, and the projection's distance along the line.
+    // Distance along the line at each vertex, then at the projection.
     let mut cum = Vec::with_capacity(coords.len());
     cum.push(0.0);
     for i in 0..coords.len() - 1 {
@@ -295,7 +285,7 @@ pub fn bearing_at_projection(
     ((bearing % 360.0) + 360.0) % 360.0
 }
 
-/// Interpolate the point `dist` meters along a polyline with cumulative lengths `cum`.
+/// The point `dist` meters along a polyline whose vertices are `cum` meters along.
 fn point_at_distance(coords: &[Coord<f64>], cum: &[f64], dist: f64) -> Point<f64> {
     let dist = dist.clamp(0.0, *cum.last().unwrap());
     for i in 0..coords.len() - 1 {
@@ -306,9 +296,6 @@ fn point_at_distance(coords: &[Coord<f64>], cum: &[f64], dist: f64) -> Point<f64
             } else {
                 0.0
             };
-            // Wrap the longitude delta so segments crossing the antimeridian
-            // (e.g. 179.999 -> -179.999) interpolate across ±180 rather than
-            // the ~360° numeric path through longitude 0.
             let dx = wrap_lon_delta(coords[i + 1].x - coords[i].x);
             return Point::new(
                 wrap_lon(coords[i].x + t * dx),
@@ -342,7 +329,7 @@ mod tests {
 
     #[test]
     fn test_projection_across_antimeridian() {
-        // Segment crossing 180°; query point on the west side of the line.
+        // Segment crossing 180°; query point just north of it, east of 180°.
         let (closest, frac) = project_point_to_segment(
             Point::new(-179.99990, 0.0001),
             Point::new(179.99985, 0.0),
@@ -366,8 +353,8 @@ mod tests {
             Edge::new(1, geom.clone(), Frc::Frc4, Fow::SingleCarriageway),
         );
         let idx = SpatialIndex::new(vec![EdgeEnvelope::new(edge_idx, &geom)]);
-        // Query from just east of the line (179.9999°): the 100m box crosses ±180
-        // and must still find the edge stored at -179.9999°.
+        // Query from 179.9999°, ~11 m across 180° from the edge stored at
+        // -179.9999°. The 100 m box crosses ±180 and must still find it.
         let hits = idx.find_nearby(Point::new(179.9999, 0.0), 100.0);
         assert_eq!(hits.len(), 1);
     }

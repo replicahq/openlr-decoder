@@ -130,7 +130,6 @@ Verified against the 47,931-code KC corpus where noted.
 **Not implemented**
 - **≥3 LRPs**: segments are solved pairwise; the intermediate LRP is not forced onto one shared edge (§12.1 Step 5). Untested — corpus is all 2-LRP.
 - **PointAlongLine** returns the path; offset, side-of-road and orientation are not applied.
-- **Bearing** uses the projection segment, not the 20 m BEARDIST chord (§5.2.4).
 - **FOW**: no `junction`/`oneway` columns, so `Roundabout` never occurs and `MultipleCarriageway` only via `lanes >= 4`.
 - GeoCoordinate, POI, area types and ClosedLine are unsupported.
 
@@ -251,6 +250,18 @@ having a junction our OSM car graph lacks (measured on the KC corpus: the guard 
 all ~100 such overshoots while keeping every extension that landed on HERE's endpoint). Because the offset then spans more
 than one edge, `*_offset_fraction` (relative to the first/last edge) can exceed 1.0;
 the meter offsets are authoritative.
+
+## Comment Style
+
+1. A doc comment covers what the signature doesn't: panics, units, ranges, non-obvious
+   `None` cases. Skip it when the name already says everything.
+2. Keep the *why*: spec section references, HERE quirks, corpus measurements.
+3. Say each fact once, where it applies; cross-link with [`Item`] instead of repeating it.
+4. Fix or delete anything wrong or speculative rather than polishing it.
+5. Plain sentences. No bold, no em-dash asides, no "i.e." chains.
+
+Comment-only changes must pass `python qa/check_comment_only.py [ref]` (default `main`),
+which diffs each changed `.rs` file with comments stripped.
 
 ## Building & Testing
 
