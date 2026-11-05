@@ -34,10 +34,7 @@ impl PartialOrd for AStarNode {
 impl Ord for AStarNode {
     fn cmp(&self, other: &Self) -> Ordering {
         // Reversed so BinaryHeap pops the lowest f_score first.
-        other
-            .f_score
-            .partial_cmp(&self.f_score)
-            .unwrap_or(Ordering::Equal)
+        other.f_score.total_cmp(&self.f_score)
     }
 }
 
@@ -545,26 +542,7 @@ impl<'a> Decoder<'a> {
             all_candidates.push(candidates);
         }
 
-        // Only one LRP needs a candidate within max_candidate_distance_m, so a
-        // location that runs slightly off our network can still decode.
-        let max_dist = self.config.candidate_config.max_candidate_distance_m;
-        let has_close_candidate = all_candidates
-            .iter()
-            .any(|candidates| candidates.iter().any(|c| c.distance_m <= max_dist));
-
-        if !has_close_candidate {
-            // Report the LRP whose nearest candidate is closest.
-            let (worst_idx, _) = all_candidates
-                .iter()
-                .enumerate()
-                .map(|(i, c)| {
-                    let min_dist = c.iter().map(|c| c.distance_m).fold(f64::MAX, f64::min);
-                    (i, min_dist)
-                })
-                .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
-                .unwrap_or((0, f64::MAX));
-            return Err(DecodeError::NoCandidates { index: worst_idx });
-        }
+        self.require_close_candidate(&all_candidates)?;
 
         let mut full_path: Vec<EdgeIndex> = Vec::new();
         let mut total_length = 0.0;
@@ -625,18 +603,12 @@ impl<'a> Decoder<'a> {
             }
         }
 
-        // Ties go to the earliest edge.
-        let (primary_edge_idx, primary_coverage) = edge_coverages
-            .iter()
-            .copied()
-            .reduce(|best, c| if c.1 > best.1 { c } else { best })
-            .unwrap_or_else(|| (full_path.first().copied().unwrap_or(EdgeIndex::new(0)), 0.0));
-
-        let primary_edge_id = self
-            .network
-            .edge(primary_edge_idx)
-            .map(|e| e.id)
-            .unwrap_or(0);
+        let (primary_edge_id, primary_coverage) =
+            self.primary_edge(&edge_coverages)
+                .ok_or(DecodeError::NoPath {
+                    from: 0,
+                    to: points.len() - 1,
+                })?;
 
         let first_lrp_coord = Point::new(points[0].coordinate.lon, points[0].coordinate.lat);
         let last_lrp_coord = Point::new(
@@ -704,24 +676,7 @@ impl<'a> Decoder<'a> {
             all_candidates.push(candidates);
         }
 
-        // Same close-candidate check as decode_line.
-        let max_dist = self.config.candidate_config.max_candidate_distance_m;
-        let has_close_candidate = all_candidates
-            .iter()
-            .any(|candidates| candidates.iter().any(|c| c.distance_m <= max_dist));
-
-        if !has_close_candidate {
-            let (worst_idx, _) = all_candidates
-                .iter()
-                .enumerate()
-                .map(|(i, c)| {
-                    let min_dist = c.iter().map(|c| c.distance_m).fold(f64::MAX, f64::min);
-                    (i, min_dist)
-                })
-                .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
-                .unwrap_or((0, f64::MAX));
-            return Err(DecodeError::NoCandidates { index: worst_idx });
-        }
+        self.require_close_candidate(&all_candidates)?;
 
         let expected_distance = points[0]
             .path
@@ -742,27 +697,14 @@ impl<'a> Decoder<'a> {
             lfrcnp,
         )?;
 
-        let (primary_edge_idx, primary_coverage) = path_result
+        let coverages: Vec<(EdgeIndex, f64)> = path_result
             .coverages
             .iter()
-            .max_by(|a, b| a.coverage_m.partial_cmp(&b.coverage_m).unwrap())
             .map(|c| (c.edge_idx, c.coverage_m))
-            .unwrap_or_else(|| {
-                (
-                    path_result
-                        .edges
-                        .first()
-                        .copied()
-                        .unwrap_or(EdgeIndex::new(0)),
-                    0.0,
-                )
-            });
-
-        let primary_edge_id = self
-            .network
-            .edge(primary_edge_idx)
-            .map(|e| e.id)
-            .unwrap_or(0);
+            .collect();
+        let (primary_edge_id, primary_coverage) = self
+            .primary_edge(&coverages)
+            .ok_or(DecodeError::NoPath { from: 0, to: 1 })?;
 
         let mut full_path = path_result.edges.clone();
         let first_lrp_coord = Point::new(points[0].coordinate.lon, points[0].coordinate.lat);
@@ -787,6 +729,44 @@ impl<'a> Decoder<'a> {
             primary_edge_id,
             primary_edge_coverage_m: primary_coverage,
         })
+    }
+
+    /// Only one LRP needs a candidate within `max_candidate_distance_m`, so a
+    /// location that runs slightly off our network can still decode. If none
+    /// does, the error names the LRP that came closest.
+    fn require_close_candidate(
+        &self,
+        all_candidates: &[Vec<Candidate>],
+    ) -> Result<(), DecodeError> {
+        let max_dist = self.config.candidate_config.max_candidate_distance_m;
+        let nearest = |candidates: &Vec<Candidate>| {
+            candidates
+                .iter()
+                .map(|c| c.distance_m)
+                .fold(f64::INFINITY, f64::min)
+        };
+        let (closest_lrp, distance) = all_candidates
+            .iter()
+            .map(nearest)
+            .enumerate()
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .unwrap_or((0, f64::INFINITY));
+        if distance <= max_dist {
+            Ok(())
+        } else {
+            Err(DecodeError::NoCandidates { index: closest_lrp })
+        }
+    }
+
+    /// Stable id and coverage of the edge with the most coverage, ties to the
+    /// earliest. `None` only for an empty path.
+    fn primary_edge(&self, coverages: &[(EdgeIndex, f64)]) -> Option<(u64, f64)> {
+        let (idx, coverage) =
+            coverages
+                .iter()
+                .copied()
+                .reduce(|best, c| if c.1 > best.1 { c } else { best })?;
+        Some((self.network.edge(idx)?.id, coverage))
     }
 
     /// Best single-edge path where both LRPs project within 10 m of the same
@@ -1921,6 +1901,39 @@ mod tests {
             None,
         );
         assert!(result.is_err(), "{result:?}");
+    }
+
+    #[test]
+    fn test_require_close_candidate_names_closest_lrp() {
+        let (network, spatial, e1, _) = two_short_edges();
+        let decoder = Decoder::new(&network, &spatial);
+        let at = |distance_m| Candidate {
+            distance_m,
+            ..short_candidate(e1, 0.5)
+        };
+
+        let far = [vec![at(80.0)], vec![at(50.0), at(90.0)], vec![at(60.0)]];
+        assert!(matches!(
+            decoder.require_close_candidate(&far),
+            Err(DecodeError::NoCandidates { index: 1 })
+        ));
+        let one_close = [vec![at(80.0)], vec![at(20.0)]];
+        assert!(decoder.require_close_candidate(&one_close).is_ok());
+    }
+
+    #[test]
+    fn test_primary_edge_ties_to_earliest() {
+        let (network, spatial, e1, e2) = two_short_edges();
+        let decoder = Decoder::new(&network, &spatial);
+        assert_eq!(
+            decoder.primary_edge(&[(e1, 3.0), (e2, 3.0)]),
+            Some((100, 3.0))
+        );
+        assert_eq!(
+            decoder.primary_edge(&[(e1, 2.0), (e2, 3.0)]),
+            Some((101, 3.0))
+        );
+        assert_eq!(decoder.primary_edge(&[]), None);
     }
 
     /// Two disconnected 100 m edges, each with an LRP pair spanning 50 m. Edge 1's
