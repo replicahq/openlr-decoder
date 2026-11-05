@@ -895,10 +895,10 @@ impl<'a> Decoder<'a> {
         let rel_min = expected_distance * (1.0 - self.config.length_tolerance);
         let rel_max = expected_distance * (1.0 + self.config.length_tolerance);
 
-        // The looser of the two minimums, but never below 10 m. DNP quantization
-        // overestimates short distances, so the minimum is lenient.
+        // The looser of the two minimums. DNP quantization overestimates short
+        // distances, so the minimum is lenient.
         let abs_min = (expected_distance - self.config.absolute_length_tolerance).max(0.0);
-        let min_distance = rel_min.min(abs_min).max(10.0);
+        let min_distance = rel_min.min(abs_min);
 
         let max_valid_distance = self.max_valid_distance(expected_distance);
         debug_assert!(max_valid_distance >= rel_max);
@@ -1053,7 +1053,9 @@ impl<'a> Decoder<'a> {
 
             let path_cost = start_edge_partial + middle_cost + end_edge_partial;
 
-            if path_cost < min_distance || path_cost > max_valid_distance {
+            // Zero length means both LRPs clamped to the same node; every edge
+            // would fall under MIN_EDGE_CONTRIBUTION below and leave no path.
+            if path_cost <= 0.0 || path_cost < min_distance || path_cost > max_valid_distance {
                 continue;
             }
 
@@ -1851,59 +1853,84 @@ mod tests {
         );
     }
 
-    /// A 4 m same-edge path is under the 10 m minimum, but both LRPs are within
-    /// 5 m of the edge, so it is accepted (regression test for 9e13bcb).
-    #[test]
-    fn test_same_edge_short_path_relaxed_min_distance() {
+    fn short_candidate(edge_idx: EdgeIndex, projection_fraction: f64) -> Candidate {
+        Candidate {
+            edge_idx,
+            distance_m: 7.0, // too far for the same-edge "excellent match" relaxation
+            bearing_diff: 0.0,
+            frc_diff: 0,
+            fow_score: 1.0,
+            score: 0.0,
+            projection_fraction,
+        }
+    }
+
+    /// Two 5 m edges meeting at node 2.
+    fn two_short_edges() -> (RoadNetwork, SpatialIndex, EdgeIndex, EdgeIndex) {
         let (network, spatial) = TestNetworkBuilder::new()
             .add_node(1, 0.0, 0.0)
             .add_node(2, 0.000045, 0.0)
+            .add_node(3, 0.00009, 0.0)
             .add_edge(100, 1, 2, 5.0, Frc::Frc3, Fow::SingleCarriageway)
+            .add_edge(101, 2, 3, 5.0, Frc::Frc3, Fow::SingleCarriageway)
             .build();
+        let ids = network.edge_id_to_index.as_ref().unwrap();
+        let (e1, e2) = (ids[&100], ids[&101]);
+        (network, spatial, e1, e2)
+    }
 
+    /// HERE's shortest DNP bucket is 0–58 m, so a 4 m path for DNP 29 is valid.
+    #[test]
+    fn test_short_same_edge_path_accepted() {
+        let (network, spatial, e1, _) = two_short_edges();
         let decoder = Decoder::new(&network, &spatial);
 
-        let edge_idx = *network
-            .edge_id_to_index
-            .as_ref()
-            .unwrap()
-            .get(&100)
+        let path = decoder
+            .find_best_path(
+                &[short_candidate(e1, 0.1)],
+                &[short_candidate(e1, 0.9)],
+                29.0,
+                0,
+                None,
+            )
             .unwrap();
-
-        let start_cand = Candidate {
-            edge_idx,
-            distance_m: 2.0,
-            bearing_diff: 0.0,
-            frc_diff: 0,
-            fow_score: 1.0,
-            score: 0.0,
-            projection_fraction: 0.1,
-        };
-
-        let end_cand = Candidate {
-            edge_idx,
-            distance_m: 2.0,
-            bearing_diff: 0.0,
-            frc_diff: 0,
-            fow_score: 1.0,
-            score: 0.0,
-            projection_fraction: 0.9,
-        };
-
-        let start_candidates = vec![start_cand];
-        let end_candidates = vec![end_cand];
-
-        let result = decoder.find_best_path(&start_candidates, &end_candidates, 5.0, 0, None);
-
-        assert!(
-            result.is_ok(),
-            "Should find a path even if shorter than 10m floor because of excellent spatial match. Error: {:?}",
-            result.err()
-        );
-        let path = result.unwrap();
-        assert_eq!(path.edges.len(), 1);
-        assert_eq!(path.edges[0], edge_idx);
+        assert_eq!(path.edges, vec![e1]);
         assert!((path.total_length - 4.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_short_multi_edge_path_accepted() {
+        let (network, spatial, e1, e2) = two_short_edges();
+        let decoder = Decoder::new(&network, &spatial);
+
+        let path = decoder
+            .find_best_path(
+                &[short_candidate(e1, 0.5)],
+                &[short_candidate(e2, 0.5)],
+                29.0,
+                0,
+                None,
+            )
+            .unwrap();
+        assert_eq!(path.edges, vec![e1, e2]);
+        assert!((path.total_length - 5.0).abs() < 0.1);
+    }
+
+    /// Both LRPs clamped to node 2: a zero-length path, which would come back
+    /// with no edges.
+    #[test]
+    fn test_zero_length_path_rejected() {
+        let (network, spatial, e1, e2) = two_short_edges();
+        let decoder = Decoder::new(&network, &spatial);
+
+        let result = decoder.find_best_path(
+            &[short_candidate(e1, 1.0)],
+            &[short_candidate(e2, 0.0)],
+            29.0,
+            0,
+            None,
+        );
+        assert!(result.is_err(), "{result:?}");
     }
 
     /// Network for terminal-snap tests (all edges one-way, west→east):
