@@ -1,39 +1,27 @@
-use geo::{Coord, Distance, Haversine, LineString, Point};
+//! Edge lookup by location, and point-on-line geometry: projection, bearings
+//! and positions along a polyline. Coordinates are WGS84 degrees (x = lon,
+//! y = lat) and distances are meters.
+
+use geo::{BoundingRect, Coord, Distance, Haversine, LineString, Point};
 use petgraph::graph::EdgeIndex;
-use rstar::{RTree, RTreeObject, AABB};
+use rstar::{Envelope, RTree, RTreeObject, AABB};
 
 /// An edge's bounding box, in degrees. The geometry stays in the graph's
 /// [`Edge`](crate::graph::Edge) so it isn't stored twice.
 #[derive(Debug, Clone)]
 pub struct EdgeEnvelope {
     pub edge_idx: EdgeIndex,
-    pub min_x: f64,
-    pub min_y: f64,
-    pub max_x: f64,
-    pub max_y: f64,
+    envelope: AABB<[f64; 2]>,
 }
 
 impl EdgeEnvelope {
+    /// An empty `geometry` gets an empty box, which no query intersects.
     pub fn new(edge_idx: EdgeIndex, geometry: &LineString<f64>) -> Self {
-        let mut min_x = f64::MAX;
-        let mut min_y = f64::MAX;
-        let mut max_x = f64::MIN;
-        let mut max_y = f64::MIN;
-
-        for c in geometry.coords() {
-            min_x = min_x.min(c.x);
-            min_y = min_y.min(c.y);
-            max_x = max_x.max(c.x);
-            max_y = max_y.max(c.y);
-        }
-
-        EdgeEnvelope {
-            edge_idx,
-            min_x,
-            min_y,
-            max_x,
-            max_y,
-        }
+        let envelope = match geometry.bounding_rect() {
+            Some(r) => AABB::from_corners(r.min().into(), r.max().into()),
+            None => AABB::new_empty(),
+        };
+        EdgeEnvelope { edge_idx, envelope }
     }
 }
 
@@ -41,7 +29,7 @@ impl RTreeObject for EdgeEnvelope {
     type Envelope = AABB<[f64; 2]>;
 
     fn envelope(&self) -> Self::Envelope {
-        AABB::from_corners([self.min_x, self.min_y], [self.max_x, self.max_y])
+        self.envelope
     }
 }
 
@@ -119,47 +107,67 @@ pub fn bearing_difference(b1: f64, b2: f64) -> f64 {
     }
 }
 
-/// Fraction of the line's length, in [0, 1], at which `point` projects onto it.
-/// Returns 0.0 for a degenerate line.
-pub fn project_point_to_line_fraction(point: Point<f64>, line: &LineString<f64>) -> f64 {
-    let coords: Vec<Coord<f64>> = line.coords().cloned().collect();
-    if coords.len() < 2 {
-        return 0.0;
-    }
+/// Where a point projects onto a line.
+#[derive(Debug, Clone, Copy)]
+pub struct LineProjection {
+    /// The closest point on the line.
+    pub point: Point<f64>,
+    /// Meters from the projected point to [`point`](Self::point).
+    pub distance_m: f64,
+    /// Meters along the line from its start to the closest point.
+    pub along_m: f64,
+    pub length_m: f64,
+}
 
-    let mut total_length = 0.0;
-    let mut segments: Vec<(f64, f64)> = Vec::new(); // (distance to segment start, length)
-
-    for i in 0..coords.len() - 1 {
-        let p1 = Point::new(coords[i].x, coords[i].y);
-        let p2 = Point::new(coords[i + 1].x, coords[i + 1].y);
-        let seg_len = Haversine.distance(p1, p2);
-        segments.push((total_length, seg_len));
-        total_length += seg_len;
-    }
-
-    if total_length == 0.0 {
-        return 0.0;
-    }
-
-    let mut best_dist = f64::MAX;
-    let mut best_fraction = 0.0;
-
-    for (i, (seg_start, seg_len)) in segments.iter().enumerate() {
-        let p1 = Point::new(coords[i].x, coords[i].y);
-        let p2 = Point::new(coords[i + 1].x, coords[i + 1].y);
-
-        let (closest, frac) = project_point_to_segment(point, p1, p2);
-        let dist = Haversine.distance(point, closest);
-
-        if dist < best_dist {
-            best_dist = dist;
-            let dist_along = seg_start + frac * seg_len;
-            best_fraction = dist_along / total_length;
+impl LineProjection {
+    /// [`along_m`](Self::along_m) as a fraction of the length, in [0, 1]; 0.0 for
+    /// a zero-length line.
+    pub fn fraction(&self) -> f64 {
+        if self.length_m > 0.0 {
+            (self.along_m / self.length_m).clamp(0.0, 1.0)
+        } else {
+            0.0
         }
     }
+}
 
-    best_fraction.clamp(0.0, 1.0)
+/// Project `point` onto the nearest segment of `line`. `None` if the line has
+/// fewer than two coordinates.
+pub fn project_onto_line(point: Point<f64>, line: &LineString<f64>) -> Option<LineProjection> {
+    let coords = &line.0;
+    if coords.len() < 2 {
+        return None;
+    }
+    let cum = cumulative_lengths(coords);
+
+    let mut best = LineProjection {
+        point: Point::from(coords[0]),
+        distance_m: f64::MAX,
+        along_m: 0.0,
+        length_m: *cum.last().unwrap(),
+    };
+    for i in 0..coords.len() - 1 {
+        let (closest, frac) =
+            project_point_to_segment(point, Point::from(coords[i]), Point::from(coords[i + 1]));
+        let dist = Haversine.distance(point, closest);
+        if dist < best.distance_m {
+            best.point = closest;
+            best.distance_m = dist;
+            best.along_m = cum[i] + frac * (cum[i + 1] - cum[i]);
+        }
+    }
+    Some(best)
+}
+
+/// Meters along the line at each vertex.
+fn cumulative_lengths(coords: &[Coord<f64>]) -> Vec<f64> {
+    let mut cum = Vec::with_capacity(coords.len());
+    cum.push(0.0);
+    for w in coords.windows(2) {
+        let d = Haversine.distance(Point::from(w[0]), Point::from(w[1]));
+        cum.push(cum.last().unwrap() + d);
+    }
+    cum
 }
 
 /// Wrap a longitude, or a longitude difference, into [-180, 180]. Applied to
@@ -175,13 +183,16 @@ fn wrap_lon(x: f64) -> f64 {
     }
 }
 
-/// Closest point on segment `p1`–`p2` and its fraction along the segment. The
-/// projection is planar in degrees, with longitudes wrapped via [`wrap_lon`].
+/// Closest point on segment `p1`–`p2` and its fraction along the segment.
+/// Planar, with longitude scaled by cos(latitude) so a degree counts the same
+/// in both axes, and wrapped via [`wrap_lon`]. Over a road segment the error
+/// against a great-circle projection is far below coordinate precision.
 fn project_point_to_segment(
     point: Point<f64>,
     p1: Point<f64>,
     p2: Point<f64>,
 ) -> (Point<f64>, f64) {
+    let k = point.y().to_radians().cos();
     let dx = wrap_lon(p2.x() - p1.x());
     let dy = p2.y() - p1.y();
 
@@ -190,74 +201,53 @@ fn project_point_to_segment(
     }
 
     let px = wrap_lon(point.x() - p1.x());
-    let t = (px * dx + (point.y() - p1.y()) * dy) / (dx * dx + dy * dy);
-    let t_clamped = t.clamp(0.0, 1.0);
+    let py = point.y() - p1.y();
+    let t = (px * dx * k * k + py * dy) / (dx * dx * k * k + dy * dy);
+    let t = t.clamp(0.0, 1.0);
 
-    let closest = Point::new(wrap_lon(p1.x() + t_clamped * dx), p1.y() + t_clamped * dy);
-    (closest, t_clamped)
+    let closest = Point::new(wrap_lon(p1.x() + t * dx), p1.y() + t * dy);
+    (closest, t)
 }
 
-/// BEARDIST from the OpenLR spec (§5.2.4): bearing is measured over a 20 m chord.
-pub const BEARDIST_M: f64 = 20.0;
-
-/// Which side of the projection point the bearing chord is taken from.
+/// Which side of a point on a line [`bearing_along`] takes its chord from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BearingDirection {
-    /// The [`BEARDIST_M`] after the projection point. Used for every LRP but the last,
-    /// whose attributes describe the outgoing line.
+    /// The stretch after the point.
     Forward,
-    /// The [`BEARDIST_M`] leading up to the projection point, for the last LRP. The
-    /// bearing still points in the travel direction, as HERE encodes it; the spec
-    /// points it back along the line.
+    /// The stretch leading up to the point.
     Backward,
 }
 
-/// Bearing in degrees [0, 360), in the travel direction, of the chord in `direction`
-/// from where `point` projects onto `line`. The chord is cut short at the line's
-/// end; if that leaves under 0.5 m, the other direction is used, and if both are
-/// that short the result is 0.0.
-pub fn bearing_at_projection(
-    point: Point<f64>,
+/// Bearing in degrees [0, 360), in the line's direction, of the `chord_m`
+/// chord on the `direction` side of the point `along_m` meters along `line`
+/// (see [`LineProjection`]). The chord is cut short at the line's end; if that
+/// leaves under 0.5 m, the other side is used, and if both are that short the
+/// result is 0.0. A chord smooths over vertex noise that a single segment's
+/// bearing would pick up.
+pub fn bearing_along(
     line: &LineString<f64>,
+    along_m: f64,
+    chord_m: f64,
     direction: BearingDirection,
 ) -> f64 {
     use geo::{Bearing, Geodesic};
 
-    let coords: Vec<Coord<f64>> = line.coords().cloned().collect();
+    let coords = &line.0;
     if coords.len() < 2 {
         return 0.0;
     }
-
-    // Distance along the line at each vertex, then at the projection.
-    let mut cum = Vec::with_capacity(coords.len());
-    cum.push(0.0);
-    for i in 0..coords.len() - 1 {
-        let d = Haversine.distance(Point::from(coords[i]), Point::from(coords[i + 1]));
-        cum.push(cum[i] + d);
-    }
+    let cum = cumulative_lengths(coords);
     let total = *cum.last().unwrap();
 
-    let mut best_dist = f64::MAX;
-    let mut along = 0.0;
-    for i in 0..coords.len() - 1 {
-        let (closest, frac) =
-            project_point_to_segment(point, Point::from(coords[i]), Point::from(coords[i + 1]));
-        let dist = Haversine.distance(point, closest);
-        if dist < best_dist {
-            best_dist = dist;
-            along = cum[i] + frac * (cum[i + 1] - cum[i]);
-        }
-    }
-
-    let proj = point_at_distance(&coords, &cum, along);
+    let proj = point_at_distance(coords, &cum, along_m);
     let chord = |dir: BearingDirection| -> Option<(Point<f64>, Point<f64>)> {
         let (a, b) = match dir {
             BearingDirection::Forward => (
                 proj,
-                point_at_distance(&coords, &cum, (along + BEARDIST_M).min(total)),
+                point_at_distance(coords, &cum, (along_m + chord_m).min(total)),
             ),
             BearingDirection::Backward => (
-                point_at_distance(&coords, &cum, (along - BEARDIST_M).max(0.0)),
+                point_at_distance(coords, &cum, (along_m - chord_m).max(0.0)),
                 proj,
             ),
         };
@@ -299,6 +289,10 @@ fn point_at_distance(coords: &[Coord<f64>], cum: &[f64], dist: f64) -> Point<f64
 mod tests {
     use super::*;
 
+    fn bearing_at_projection(p: Point<f64>, line: &LineString<f64>, dir: BearingDirection) -> f64 {
+        bearing_along(line, project_onto_line(p, line).unwrap().along_m, 20.0, dir)
+    }
+
     #[test]
     fn test_bearing_difference() {
         assert!((bearing_difference(10.0, 20.0) - 10.0).abs() < 0.01);
@@ -327,6 +321,21 @@ mod tests {
         // 0.00025° of the 0.0003° span → t ≈ 0.833, at longitude ≈ -179.9999 (not near 0°).
         assert!((frac - 0.8333).abs() < 0.01, "frac {frac}");
         assert!(closest.x() < -179.999, "closest lon {}", closest.x());
+    }
+
+    #[test]
+    fn test_projection_scales_longitude_by_latitude() {
+        // At 60°N a degree of longitude is half a degree of latitude, so this
+        // segment runs at 45° NE. A point 55.6 m due north of its start projects
+        // 55.6·cos45° = 39.3 m along, a quarter of its 157 m. Unscaled degrees
+        // would put it at 0.1.
+        let line = LineString::from(vec![(0.0, 60.0), (0.002, 60.001)]);
+        let proj = project_onto_line(Point::new(0.0, 60.0005), &line).unwrap();
+        assert!((proj.fraction() - 0.25).abs() < 0.005, "{proj:?}");
+        assert!((proj.distance_m - 39.3).abs() < 0.5, "{proj:?}");
+        // A quarter of the way from (0, 60) to (0.002, 60.001).
+        assert!((proj.point.x() - 0.0005).abs() < 1e-5, "{proj:?}");
+        assert!((proj.point.y() - 60.00025).abs() < 1e-5, "{proj:?}");
     }
 
     #[test]
@@ -403,9 +412,12 @@ mod tests {
     #[test]
     fn test_edge_envelope() {
         let line = LineString::from(vec![(0.0, 0.0), (1.0, 1.0)]);
-        let env = EdgeEnvelope::new(EdgeIndex::new(0), &line);
+        let env = EdgeEnvelope::new(EdgeIndex::new(0), &line).envelope();
+        assert_eq!(env.lower(), [0.0, 0.0]);
+        assert_eq!(env.upper(), [1.0, 1.0]);
 
-        assert_eq!(env.min_x, 0.0);
-        assert_eq!(env.max_x, 1.0);
+        let empty = EdgeEnvelope::new(EdgeIndex::new(0), &LineString::new(vec![]));
+        let idx = SpatialIndex::new(vec![empty]);
+        assert!(idx.find_nearby(Point::new(0.0, 0.0), 1e6).is_empty());
     }
 }
