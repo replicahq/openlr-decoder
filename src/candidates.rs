@@ -1,8 +1,10 @@
-use geo::{Closest, Distance, Haversine, HaversineClosestPoint, Point};
+use geo::Point;
 use petgraph::graph::EdgeIndex;
 
 use crate::graph::{Fow, Frc, RoadNetwork};
-use crate::spatial::{bearing_at_projection, bearing_difference, BearingDirection, SpatialIndex};
+use crate::spatial::{
+    bearing_along, bearing_difference, project_onto_line, BearingDirection, SpatialIndex,
+};
 
 /// An edge that an LRP may lie on.
 #[derive(Debug, Clone)]
@@ -55,8 +57,15 @@ impl Default for CandidateConfig {
     }
 }
 
+/// BEARDIST from the OpenLR spec (§5.2.4): an edge's bearing is measured over
+/// a 20 m chord from the LRP's projection.
+pub const BEARDIST_M: f64 = 20.0;
+
 /// Up to `max_candidates` edges near an LRP, best score first. `direction` is
-/// [`BearingDirection::Backward`] for the last LRP and `Forward` otherwise.
+/// [`BearingDirection::Forward`] for every LRP but the last, whose attributes
+/// describe the outgoing line. The last LRP uses `Backward`, the chord leading
+/// up to it, but its bearing still points in the travel direction, as HERE
+/// encodes it; the spec points it back along the line.
 #[allow(clippy::too_many_arguments)]
 pub fn find_candidates(
     coord: Point<f64>,
@@ -76,20 +85,14 @@ pub fn find_candidates(
         .filter_map(|env| {
             let edge = network.edge(env.edge_idx)?;
 
-            let closest = match edge.geometry.haversine_closest_point(&coord) {
-                Closest::SinglePoint(p) | Closest::Intersection(p) => p,
-                Closest::Indeterminate => {
-                    let first = edge.geometry.coords().next()?;
-                    Point::new(first.x, first.y)
-                }
-            };
-            let distance_m = Haversine.distance(coord, closest);
+            let proj = project_onto_line(coord, &edge.geometry)?;
+            let distance_m = proj.distance_m;
 
             if distance_m > config.search_radius_m {
                 return None;
             }
 
-            let edge_bearing = bearing_at_projection(coord, &edge.geometry, direction);
+            let edge_bearing = bearing_along(&edge.geometry, proj.along_m, BEARDIST_M, direction);
             let bearing_diff = bearing_difference(bearing, edge_bearing);
 
             if bearing_diff > config.max_bearing_diff {
@@ -108,9 +111,6 @@ pub fn find_candidates(
             // FOW only affects the score; it never filters.
             let fow_score = edge.fow.substitution_score(fow);
 
-            let projection_fraction =
-                crate::spatial::project_point_to_line_fraction(coord, &edge.geometry);
-
             let score = compute_score(distance_m, bearing_diff, frc_diff, fow_score, config);
 
             Some(Candidate {
@@ -120,7 +120,7 @@ pub fn find_candidates(
                 frc_diff,
                 fow_score,
                 score,
-                projection_fraction,
+                projection_fraction: proj.fraction(),
             })
         })
         .collect();
