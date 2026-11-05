@@ -1,7 +1,6 @@
 //! Build a [`RoadNetwork`] and [`SpatialIndex`] from Arrow record batches or a
 //! parquet file. [`road_network_schema`] documents the expected columns.
 
-use ahash::AHashMap;
 use std::fs::File;
 use std::path::Path;
 
@@ -230,31 +229,16 @@ fn process_batch(
 
     let geometry_format = detect_geometry_format(batch);
 
-    // Dedupe the batch's nodes locally first so the network's id map is probed
-    // once per unique node rather than twice per edge. The first coordinate
-    // seen for a node id wins.
-    let mut batch_nodes: AHashMap<i64, Point<f64>> = AHashMap::new();
+    // Add nodes in row order, so a given input always yields the same node
+    // indices. The first coordinate seen for a node id wins.
     for row in 0..batch.num_rows() {
         if skip_row(row) {
             continue;
         }
-        let sv_id = start_vertex.value(row);
-        let ev_id = end_vertex.value(row);
-        let sv_lat = start_lat.value(row);
-        let sv_lon = start_lon.value(row);
-        let ev_lat = end_lat.value(row);
-        let ev_lon = end_lon.value(row);
-
-        batch_nodes
-            .entry(sv_id)
-            .or_insert_with(|| Point::new(sv_lon, sv_lat));
-        batch_nodes
-            .entry(ev_id)
-            .or_insert_with(|| Point::new(ev_lon, ev_lat));
-    }
-
-    for (node_id, coord) in batch_nodes {
-        network.get_or_add_node(node_id, coord);
+        let start = Point::new(start_lon.value(row), start_lat.value(row));
+        let end = Point::new(end_lon.value(row), end_lat.value(row));
+        network.get_or_add_node(start_vertex.value(row), start);
+        network.get_or_add_node(end_vertex.value(row), end);
     }
 
     // Build edges in parallel; only graph insertion has to be sequential.
@@ -822,6 +806,13 @@ mod tests {
         };
         assert_eq!(geom(1), 2);
         assert_eq!(geom(2), 2);
+    }
+
+    #[test]
+    fn test_nodes_added_in_row_order() {
+        let network = load(&edge_batch(vec![Some(39.0), Some(39.1)], None));
+        let ids: Vec<i64> = network.graph.node_weights().map(|n| n.id).collect();
+        assert_eq!(ids, vec![10, 11, 20, 21]);
     }
 
     #[test]
