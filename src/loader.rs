@@ -11,7 +11,7 @@ use arrow::array::{
     LargeStringArray, RecordBatch, StringArray, StringViewArray, UInt64Array,
 };
 use arrow::datatypes::{DataType, Field, Schema};
-use geo::{Bearing, Geodesic, LineString, Point};
+use geo::{Haversine, Length, LineString, Point};
 use geoarrow_array::array::LineStringArray;
 use geoarrow_array::{GeoArrowArray, GeoArrowArrayAccessor};
 use geoarrow_schema::GeoArrowType;
@@ -19,7 +19,7 @@ use geozero::{wkb, wkt, ToGeo};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use rayon::prelude::*;
 
-use crate::graph::{Edge, Fow, Frc, Node, RoadNetwork};
+use crate::graph::{Edge, Fow, Frc, RoadNetwork};
 use crate::spatial::{EdgeEnvelope, SpatialIndex};
 
 enum GeometryFormat<'a> {
@@ -39,13 +39,6 @@ enum WktSource<'a> {
     String(&'a StringArray),
     LargeString(&'a LargeStringArray),
     StringView(&'a StringViewArray),
-}
-
-struct GeometryWithMetrics {
-    geometry: LineString<f64>,
-    length_m: f64,
-    bearing_start: f64,
-    bearing_end: f64,
 }
 
 /// The Arrow schema the loader reads. Extra columns are ignored.
@@ -126,8 +119,6 @@ where
 pub struct NetworkBuilder {
     network: RoadNetwork,
     edge_envelopes: Vec<EdgeEnvelope>,
-    // Node ids already added to `network`.
-    seen_nodes: AHashMap<i64, Point<f64>>,
 }
 
 impl NetworkBuilder {
@@ -145,26 +136,17 @@ impl NetworkBuilder {
         NetworkBuilder {
             network,
             edge_envelopes: Vec::with_capacity(edge_count_hint),
-            seen_nodes: AHashMap::with_capacity(node_hint),
         }
     }
 
     pub fn push_batch(&mut self, batch: &RecordBatch) -> Result<()> {
-        process_batch(
-            batch,
-            &mut self.network,
-            &mut self.edge_envelopes,
-            &mut self.seen_nodes,
-        )
+        process_batch(batch, &mut self.network, &mut self.edge_envelopes)
     }
 
     pub fn finish(mut self) -> (RoadNetwork, SpatialIndex) {
-        // Free this before the R-tree bulk load to lower peak memory.
-        drop(self.seen_nodes);
-
-        let spatial_index = SpatialIndex::new(self.edge_envelopes);
-
+        // Drop the id maps before the R-tree bulk load to lower peak memory.
         self.network.compact();
+        let spatial_index = SpatialIndex::new(self.edge_envelopes);
 
         (self.network, spatial_index)
     }
@@ -188,7 +170,6 @@ fn process_batch(
     batch: &RecordBatch,
     network: &mut RoadNetwork,
     edge_envelopes: &mut Vec<EdgeEnvelope>,
-    seen_nodes: &mut AHashMap<i64, Point<f64>>,
 ) -> Result<()> {
     fn require_column<'a, T: 'static>(batch: &'a RecordBatch, name: &str) -> Result<&'a T> {
         let col = batch
@@ -231,9 +212,9 @@ fn process_batch(
 
     let geometry_format = detect_geometry_format(batch);
 
-    // Dedupe the batch's nodes locally first so the long-lived `seen_nodes` map
-    // is probed once per unique node rather than twice per edge. The first
-    // coordinate seen for a node id wins.
+    // Dedupe the batch's nodes locally first so the network's id map is probed
+    // once per unique node rather than twice per edge. The first coordinate
+    // seen for a node id wins.
     let mut batch_nodes: AHashMap<i64, Point<f64>> = AHashMap::new();
     for row in 0..batch.num_rows() {
         if stable_edge_id.is_null(row) || start_vertex.is_null(row) || end_vertex.is_null(row) {
@@ -255,10 +236,7 @@ fn process_batch(
     }
 
     for (node_id, coord) in batch_nodes {
-        if let std::collections::hash_map::Entry::Vacant(e) = seen_nodes.entry(node_id) {
-            e.insert(coord);
-            network.add_node(Node { id: node_id, coord });
-        }
+        network.get_or_add_node(node_id, coord);
     }
 
     // Build edges in parallel; only graph insertion has to be sequential.
@@ -376,16 +354,12 @@ fn process_batch(
                 GeometryFormat::None => fallback(),
             };
 
-            let geom_with_metrics = linestring_with_metrics(geom);
-
             let edge = Edge {
                 id: edge_id,
-                geometry: geom_with_metrics.geometry,
+                length_m: Haversine.length(&geom),
+                geometry: geom,
                 frc,
                 fow,
-                length_m: geom_with_metrics.length_m,
-                bearing_start: geom_with_metrics.bearing_start,
-                bearing_end: geom_with_metrics.bearing_end,
                 is_access_road: Frc::is_access_road(hw_tag),
             };
 
@@ -477,70 +451,6 @@ fn extract_linestring(geom: geo::Geometry<f64>) -> Option<LineString<f64>> {
         geo::Geometry::LineString(ls) => Some(ls),
         geo::Geometry::MultiLineString(mls) => mls.0.into_iter().next(),
         _ => None,
-    }
-}
-
-/// Length in meters, then start and end bearings in degrees. A geometry with
-/// fewer than two points gives all zeros.
-fn compute_metrics_from_linestring(geom: &LineString<f64>) -> (f64, f64, f64) {
-    let coords: Vec<_> = geom.coords().collect();
-    if coords.len() < 2 {
-        return (0.0, 0.0, 0.0);
-    }
-
-    let mut total_length = 0.0;
-    for i in 0..coords.len() - 1 {
-        let p1 = Point::new(coords[i].x, coords[i].y);
-        let p2 = Point::new(coords[i + 1].x, coords[i + 1].y);
-        total_length += haversine_distance(p1, p2);
-    }
-
-    let start_bearing = Geodesic.bearing(
-        Point::new(coords[0].x, coords[0].y),
-        Point::new(coords[1].x, coords[1].y),
-    );
-
-    let n = coords.len();
-    let end_bearing = Geodesic.bearing(
-        Point::new(coords[n - 2].x, coords[n - 2].y),
-        Point::new(coords[n - 1].x, coords[n - 1].y),
-    );
-
-    let normalize = |b: f64| ((b % 360.0) + 360.0) % 360.0;
-
-    (
-        total_length,
-        normalize(start_bearing),
-        normalize(end_bearing),
-    )
-}
-
-/// Great-circle distance in meters on a spherical earth. Cheaper than
-/// `Geodesic`, and its error (under 0.5%) is small next to the decoder's
-/// length tolerance.
-#[inline]
-fn haversine_distance(p1: Point<f64>, p2: Point<f64>) -> f64 {
-    const EARTH_RADIUS_M: f64 = 6371000.0;
-
-    let lat1 = p1.y().to_radians();
-    let lat2 = p2.y().to_radians();
-    let delta_lat = (p2.y() - p1.y()).to_radians();
-    let delta_lon = (p2.x() - p1.x()).to_radians();
-
-    let a =
-        (delta_lat / 2.0).sin().powi(2) + lat1.cos() * lat2.cos() * (delta_lon / 2.0).sin().powi(2);
-    let c = 2.0 * a.sqrt().atan2((1.0 - a).sqrt());
-
-    EARTH_RADIUS_M * c
-}
-
-fn linestring_with_metrics(geom: LineString<f64>) -> GeometryWithMetrics {
-    let (length_m, bearing_start, bearing_end) = compute_metrics_from_linestring(&geom);
-    GeometryWithMetrics {
-        geometry: geom,
-        length_m,
-        bearing_start,
-        bearing_end,
     }
 }
 
@@ -792,9 +702,8 @@ mod tests {
 
         let mut network = RoadNetwork::new();
         let mut edge_envelopes = Vec::new();
-        let mut seen_nodes = AHashMap::new();
 
-        let result = process_batch(&batch, &mut network, &mut edge_envelopes, &mut seen_nodes);
+        let result = process_batch(&batch, &mut network, &mut edge_envelopes);
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(

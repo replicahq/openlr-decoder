@@ -66,6 +66,12 @@ impl Default for AStarConstraints {
 /// `max_frc` is the LFRCNP filter (whitepaper §12.1 Step 5). The penalties
 /// order the search but are not part of the returned length, so with nonzero
 /// penalties the path may be slightly longer than the shortest one.
+///
+/// Dominance uses penalized cost while the bound uses real length, so a route
+/// that is cheaper only because of penalties can displace one that would have
+/// fit under `max_cost`. A multi-label search would fix this, but on the KC
+/// corpus penalties change 3 of 47,931 paths and lifting the bound changes
+/// none, so it isn't worth the complexity.
 fn bounded_astar(
     network: &RoadNetwork,
     start: NodeIndex,
@@ -784,7 +790,7 @@ impl<'a> Decoder<'a> {
     }
 
     /// Best single-edge path where both LRPs project within 10 m of the same
-    /// edge, start before end. Returns the path and its score (lower is better).
+    /// edge, start before end.
     fn try_same_edge_solution(
         &self,
         start_candidates: &[Candidate],
@@ -793,7 +799,7 @@ impl<'a> Decoder<'a> {
         min_distance: f64,
         max_valid_distance: f64,
         max_frc: Option<Frc>,
-    ) -> Option<(PathResult, f64)> {
+    ) -> Option<PathResult> {
         const MAX_PROJECTION_DISTANCE: f64 = 10.0;
 
         // (edge_idx, length, start_offset_m, end_offset_m, score)
@@ -860,21 +866,18 @@ impl<'a> Decoder<'a> {
             }
         }
 
-        best_same_edge.map(|(edge_idx, length, start_offset_m, end_offset_m, score)| {
-            (
-                PathResult {
-                    edges: vec![edge_idx],
-                    coverages: vec![EdgeCoverage {
-                        edge_idx,
-                        coverage_m: length,
-                    }],
-                    total_length: length,
-                    start_offset_m,
-                    end_offset_m,
-                },
-                score,
-            )
-        })
+        best_same_edge.map(
+            |(edge_idx, length, start_offset_m, end_offset_m, _score)| PathResult {
+                edges: vec![edge_idx],
+                coverages: vec![EdgeCoverage {
+                    edge_idx,
+                    coverage_m: length,
+                }],
+                total_length: length,
+                start_offset_m,
+                end_offset_m,
+            },
+        )
     }
 
     /// Best path from one of `start_candidates` to one of `end_candidates` whose
@@ -909,7 +912,7 @@ impl<'a> Decoder<'a> {
         // A close same-edge match wins outright. Multi-edge alternatives can
         // score slightly better per candidate but add edges that contribute
         // almost no length.
-        if let Some((result, _score)) = self.try_same_edge_solution(
+        if let Some(result) = self.try_same_edge_solution(
             start_candidates,
             end_candidates,
             expected_distance,
@@ -1083,9 +1086,7 @@ impl<'a> Decoder<'a> {
                 }
             }
 
-            if end_cand.edge_idx != start_cand.edge_idx
-                && end_edge_partial / path_cost >= MIN_EDGE_CONTRIBUTION
-            {
+            if end_edge_partial / path_cost >= MIN_EDGE_CONTRIBUTION {
                 end_offset_m = end_edge.length_m * (1.0 - end_cand.projection_fraction);
                 edges.push(end_cand.edge_idx);
                 coverages.push(EdgeCoverage {
