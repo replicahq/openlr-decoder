@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::{Array, AsArray};
-use pyo3::exceptions::{PyTypeError, PyValueError};
+use pyo3::exceptions::{PyOSError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::Py;
 use pyo3_arrow::input::AnyArray;
@@ -37,14 +37,26 @@ impl PyRoadNetwork {
     ///     RoadNetwork
     ///
     /// Raises:
-    ///     ValueError: If the file cannot be read or does not match the schema.
+    ///     OSError: If the file cannot be opened, e.g. FileNotFoundError.
+    ///     ValueError: If the file is not valid parquet or does not match the schema.
     #[staticmethod]
     #[pyo3(signature = (path))]
     fn from_parquet(py: Python<'_>, path: &str) -> PyResult<Self> {
         // Nothing here touches Python objects, so release the GIL.
         let (network, spatial) = py
             .detach(|| load_network_from_parquet(Path::new(path)))
-            .map_err(|e| PyValueError::new_err(format!("Failed to load network: {}", e)))?;
+            .map_err(|e| {
+                let message = format!("Failed to load network: {e:#}");
+                // OSError(errno, strerror, filename) picks the subclass, such as
+                // FileNotFoundError, and fills errno and filename.
+                match e.chain().find_map(|c| c.downcast_ref::<std::io::Error>()) {
+                    Some(io) => match io.raw_os_error() {
+                        Some(errno) => PyOSError::new_err((errno, message, path.to_string())),
+                        None => std::io::Error::new(io.kind(), message).into(),
+                    },
+                    None => PyValueError::new_err(message),
+                }
+            })?;
 
         Ok(PyRoadNetwork {
             network: Arc::new(network),
@@ -296,6 +308,9 @@ pub struct PyDecodedPath {
     /// Stable edge ids along the path, in travel order.
     #[pyo3(get)]
     pub edge_ids: Vec<u64>,
+    /// Full length of each edge in `edge_ids`.
+    #[pyo3(get)]
+    pub edge_lengths: Vec<f64>,
     /// Length of the location along the path, from the first LRP to the last.
     /// This excludes the offsets, and includes any start or end edge under 3%
     /// of the path that was left out of `edge_ids`.
@@ -342,6 +357,7 @@ impl From<DecodedPath> for PyDecodedPath {
     fn from(path: DecodedPath) -> Self {
         PyDecodedPath {
             edge_ids: path.edge_ids,
+            edge_lengths: path.edge_lengths_m,
             length: path.length_m,
             positive_offset: path.positive_offset_m,
             negative_offset: path.negative_offset_m,
@@ -435,6 +451,10 @@ impl PyDecoder {
     ///       of the path, so edges added by a terminal-node snap are 1.0.
     ///     - length: float64
     ///     - error: string, null on success
+    ///
+    /// Raises:
+    ///     TypeError: If ``openlr_codes`` is an Arrow array of a non-string type.
+    ///     ValueError: If the Arrow data cannot be read.
     #[pyo3(signature = (openlr_codes, *, explode = false))]
     fn decode_batch(
         &self,
