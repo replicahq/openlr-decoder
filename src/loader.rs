@@ -53,9 +53,10 @@ enum WktSource<'a> {
 /// - `lanes` (optional): only used for FOW. Any type Arrow can cast to Int64;
 ///   values that don't cast, or fall outside 0–255, count as unknown.
 /// - `geometry` (optional): WKB as any binary type, WKT as any string type, or
-///   GeoArrow `geoarrow.linestring`. A MultiLineString's parts are joined in
-///   order. Missing or unparseable geometry falls back to the straight line
-///   between the endpoints.
+///   GeoArrow `geoarrow.linestring`. A MultiLineString's parts are joined head
+///   to tail. Missing or unparseable geometry, or a MultiLineString whose
+///   parts don't connect, falls back to the straight line between the
+///   endpoints.
 pub fn road_network_schema() -> Schema {
     Schema::new(vec![
         Field::new("stableEdgeId", DataType::UInt64, false),
@@ -458,50 +459,69 @@ fn parse_geoarrow_linestring(arr: &LineStringArray, row: usize) -> Option<LineSt
     Some(LineString::from(coords))
 }
 
-/// Joins a MultiLineString's parts in order, dropping a part's first coordinate
-/// when it repeats the previous part's last. Other geometry types give `None`.
+/// Joins a MultiLineString's parts head to tail, in storage order, reversing
+/// a part when that makes it connect. `None` if the parts don't chain that
+/// way, or for any other geometry type, so the caller falls back to a straight
+/// line rather than a geometry that jumps or doubles back.
 fn extract_linestring(geom: geo::Geometry<f64>) -> Option<LineString<f64>> {
     match geom {
         geo::Geometry::LineString(ls) => Some(ls),
         geo::Geometry::MultiLineString(mls) => {
-            let mut coords: Vec<geo::Coord<f64>> = Vec::new();
-            for part in mls {
-                for c in part {
-                    if coords.last() != Some(&c) {
-                        coords.push(c);
-                    }
+            let mut parts = mls.into_iter().map(|p| p.0).filter(|p| !p.is_empty());
+            let mut coords = parts.next()?;
+            let mut first_join = true;
+            for mut part in parts {
+                let end = *coords.last().unwrap();
+                let (head, tail) = (part[0], *part.last().unwrap());
+                if head == end {
+                } else if tail == end {
+                    part.reverse();
+                } else if first_join && coords[0] == head {
+                    coords.reverse();
+                } else if first_join && coords[0] == tail {
+                    coords.reverse();
+                    part.reverse();
+                } else {
+                    return None;
                 }
+                coords.extend(part.into_iter().skip(1));
+                first_join = false;
             }
-            (!coords.is_empty()).then(|| LineString::new(coords))
+            Some(LineString::new(coords))
         }
         _ => None,
     }
 }
 
 /// Read base64 OpenLR codes from the `openlr` column (any string type) of a
-/// parquet file, skipping nulls. Errors if the column is missing or not a string.
+/// parquet file, skipping nulls. Dictionary-encoded strings work too. Errors if
+/// the column is missing or not a string.
 pub fn load_openlr_codes(path: &Path) -> Result<Vec<String>> {
     let file = File::open(path).context("Failed to open parquet file")?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
-    let reader = builder.build()?;
+
+    // Check the schema, not each batch, so a file with no rows errors too.
+    let field = builder
+        .schema()
+        .field_with_name("openlr")
+        .map_err(|_| anyhow!("Missing column 'openlr'"))?;
+    let is_string =
+        |t: &DataType| matches!(t, DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View);
+    let ok = match field.data_type() {
+        DataType::Dictionary(_, values) => is_string(values),
+        t => is_string(t),
+    };
+    if !ok {
+        return Err(anyhow!(
+            "Column 'openlr' has type {:?}, expected a string type",
+            field.data_type()
+        ));
+    }
 
     let mut codes = Vec::new();
-
-    for batch_result in reader {
+    for batch_result in builder.build()? {
         let batch = batch_result?;
-
-        let col = batch
-            .column_by_name("openlr")
-            .ok_or_else(|| anyhow!("Missing column 'openlr'"))?;
-        if !matches!(
-            col.data_type(),
-            DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
-        ) {
-            return Err(anyhow!(
-                "Column 'openlr' has type {:?}, expected a string type",
-                col.data_type()
-            ));
-        }
+        let col = batch.column_by_name("openlr").unwrap();
         let col = arrow::compute::cast(col, &DataType::Utf8)?;
         let col = col.as_any().downcast_ref::<StringArray>().unwrap();
         codes.extend(col.iter().flatten().map(str::to_string));
@@ -801,10 +821,29 @@ mod tests {
 
     #[test]
     fn test_parse_wkt_multilinestring_joins_parts() {
-        let ls =
-            parse_wkt_linestring("MULTILINESTRING((0 0, 1 1), (1 1, 2 2), (3 3, 4 4))").unwrap();
-        let xs: Vec<f64> = ls.coords().map(|c| c.x).collect();
-        assert_eq!(xs, vec![0.0, 1.0, 2.0, 3.0, 4.0]);
+        let xs = |wkt| {
+            parse_wkt_linestring(wkt).map(|ls| ls.coords().map(|c| c.x).collect::<Vec<f64>>())
+        };
+        let joined = Some(vec![0.0, 1.0, 2.0, 3.0]);
+        assert_eq!(
+            xs("MULTILINESTRING((0 0, 1 1), (1 1, 2 2), (2 2, 3 3))"),
+            joined
+        );
+        // Reversed parts, including the first.
+        assert_eq!(
+            xs("MULTILINESTRING((0 0, 1 1), (2 2, 1 1), (2 2, 3 3))"),
+            joined
+        );
+        assert_eq!(
+            xs("MULTILINESTRING((1 1, 0 0), (1 1, 2 2), (3 3, 2 2))"),
+            joined
+        );
+        // A gap or out-of-order parts: no geometry, so the loader uses a straight line.
+        assert_eq!(xs("MULTILINESTRING((0 0, 1 1), (2 2, 3 3))"), None);
+        assert_eq!(
+            xs("MULTILINESTRING((0 0, 1 1), (2 2, 3 3), (1 1, 2 2))"),
+            None
+        );
     }
 
     #[test]
@@ -824,10 +863,13 @@ mod tests {
             writer.close().unwrap();
         };
 
+        let dict: arrow::array::DictionaryArray<arrow::datatypes::Int32Type> =
+            vec![Some("a"), None, Some("b")].into_iter().collect();
         for col in [
             Arc::new(StringArray::from(vec![Some("a"), None, Some("b")])) as ArrayRef,
             Arc::new(LargeStringArray::from(vec![Some("a"), None, Some("b")])),
             Arc::new(StringViewArray::from(vec![Some("a"), None, Some("b")])),
+            Arc::new(dict),
         ] {
             let ty = col.data_type().clone();
             write(col);
@@ -835,6 +877,21 @@ mod tests {
         }
 
         write(Arc::new(Int64Array::from(vec![1i64])));
+        assert!(load_openlr_codes(&path).is_err());
+        // No rows and no openlr column: still an error.
+        let empty = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "other",
+                DataType::Int64,
+                true,
+            )])),
+            vec![Arc::new(Int64Array::from(Vec::<i64>::new()))],
+        )
+        .unwrap();
+        let mut writer =
+            ArrowWriter::try_new(File::create(&path).unwrap(), empty.schema(), None).unwrap();
+        writer.write(&empty).unwrap();
+        writer.close().unwrap();
         assert!(load_openlr_codes(&path).is_err());
         std::fs::remove_file(&path).ok();
     }
