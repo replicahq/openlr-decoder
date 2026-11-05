@@ -96,8 +96,12 @@ pub fn find_candidates(
                 return None;
             }
 
+            // Slip roads are exempt, as in the decoder's LFRCNP filter: HERE gives a
+            // ramp the class of the roads it joins (FRC0 between motorways), while
+            // the loader puts every motorway_link at Frc3. The mismatch still costs
+            // score.
             let frc_diff = (edge.frc as i8 - frc as i8).unsigned_abs();
-            if frc_diff > config.frc_tolerance {
+            if frc_diff > config.frc_tolerance && edge.fow != Fow::SlipRoad {
                 return None;
             }
 
@@ -315,6 +319,35 @@ mod tests {
         assert!(idx(11) < idx(10));
         assert_eq!(candidates[0].score, candidates[1].score);
         assert!(candidates[1].score < candidates[2].score);
+    }
+
+    #[test]
+    fn test_slip_road_exempt_from_frc_filter() {
+        use crate::test_utils::TestNetworkBuilder;
+
+        // A HERE FRC0 ramp between motorways lands on an OSM motorway_link (Frc3).
+        // An ordinary Frc3 road the same distance away is still filtered out.
+        let (network, spatial) = TestNetworkBuilder::new()
+            .add_node(1, 0.0, 0.0)
+            .add_node(2, 0.0, 0.002)
+            .add_edge(1, 1, 2, 200.0, Frc::Frc3, Fow::SlipRoad)
+            .add_edge(2, 1, 2, 200.0, Frc::Frc3, Fow::SingleCarriageway)
+            .build();
+        let idx = |id| *network.edge_id_to_index.as_ref().unwrap().get(&id).unwrap();
+
+        let candidates = find_candidates(
+            Point::new(0.001, 0.0),
+            90.0,
+            Frc::Frc0,
+            Fow::Motorway,
+            BearingDirection::Forward,
+            &network,
+            &spatial,
+            &CandidateConfig::default(),
+        );
+
+        let found: Vec<EdgeIndex> = candidates.iter().map(|c| c.edge_idx).collect();
+        assert_eq!(found, vec![idx(1)]);
     }
 
     #[test]

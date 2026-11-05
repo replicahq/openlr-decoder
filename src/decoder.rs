@@ -66,6 +66,12 @@ impl Default for AStarConstraints {
 /// `max_frc` is the LFRCNP filter (whitepaper §12.1 Step 5). The penalties
 /// order the search but are not part of the returned length, so with nonzero
 /// penalties the path may be slightly longer than the shortest one.
+///
+/// Dominance uses penalized cost while the bound uses real length, so a route
+/// that is cheaper only because of penalties can displace one that would have
+/// fit under `max_cost`. A multi-label search would fix this, but on the KC
+/// corpus penalties change 3 of 47,931 paths and lifting the bound changes
+/// none, so it isn't worth the complexity.
 fn bounded_astar(
     network: &RoadNetwork,
     start: NodeIndex,
