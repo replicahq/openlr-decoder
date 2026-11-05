@@ -54,9 +54,9 @@ enum WktSource<'a> {
 ///   values that don't cast, or fall outside 0–255, count as unknown.
 /// - `geometry` (optional): WKB as any binary type, WKT as any string type, or
 ///   GeoArrow `geoarrow.linestring`. A MultiLineString's parts are joined head
-///   to tail. Missing or unparseable geometry, or a MultiLineString whose
-///   parts don't connect, falls back to the straight line between the
-///   endpoints.
+///   to tail. Missing or unparseable geometry, a MultiLineString whose parts
+///   don't connect, or one with fewer than two points falls back to the
+///   straight line between the endpoints.
 pub fn road_network_schema() -> Schema {
     Schema::new(vec![
         Field::new("stableEdgeId", DataType::UInt64, false),
@@ -367,6 +367,8 @@ fn process_batch(
                 }
                 GeometryFormat::None => fallback(),
             };
+            // Every edge needs a line to project onto.
+            let geom = if geom.0.len() < 2 { fallback() } else { geom };
 
             let edge = Edge {
                 id: edge_id,
@@ -794,6 +796,32 @@ mod tests {
         let mut network = RoadNetwork::new();
         process_batch(batch, &mut network, &mut Vec::new()).unwrap();
         network
+    }
+
+    #[test]
+    fn test_single_point_geometry_falls_back_to_endpoints() {
+        let batch = edge_batch(vec![Some(39.0), Some(39.1)], None);
+        let mut columns = batch.columns().to_vec();
+        columns.push(Arc::new(StringArray::from(vec![
+            "LINESTRING(-94 39)",
+            "LINESTRING(-94.1 39.1, -94.1 39.101)",
+        ])));
+        let mut fields: Vec<_> = batch.schema().fields().iter().cloned().collect();
+        fields.push(Arc::new(arrow::datatypes::Field::new(
+            "geometry",
+            DataType::Utf8,
+            false,
+        )));
+        let batch =
+            RecordBatch::try_new(Arc::new(arrow::datatypes::Schema::new(fields)), columns).unwrap();
+
+        let network = load(&batch);
+        let geom = |id| {
+            let idx = network.edge_id_to_index.as_ref().unwrap()[&id];
+            network.edge(idx).unwrap().geometry.0.len()
+        };
+        assert_eq!(geom(1), 2);
+        assert_eq!(geom(2), 2);
     }
 
     #[test]
