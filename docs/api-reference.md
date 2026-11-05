@@ -223,6 +223,7 @@ Result of successfully decoding an OpenLR location reference.
 | Property | Type | Description |
 |----------|------|-------------|
 | `edge_ids` | `list[int]` | Ordered list of edge IDs forming the path |
+| `edge_lengths` | `list[float]` | Full length of each edge in `edge_ids`, meters |
 | `length` | `float` | Total path length in meters |
 | `positive_offset` | `float` | Distance (m) from start of first edge to where the location begins |
 | `negative_offset` | `float` | Distance (m) from where the location ends to end of last edge |
