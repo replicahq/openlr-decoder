@@ -16,6 +16,9 @@
 mod candidates;
 mod viterbi;
 
+#[cfg(feature = "python")]
+mod python;
+
 use geo::Point;
 use petgraph::graph::EdgeIndex;
 use road_network::{Frc, RoadNetwork, SpatialIndex};

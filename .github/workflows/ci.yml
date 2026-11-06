@@ -27,6 +27,9 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: Clippy (map-matcher Python bindings)
+        run: cargo clippy -p map-matcher --features python --all-targets -- -D warnings
+
       - name: Build
         run: cargo build --workspace
 
@@ -57,3 +60,26 @@ jobs:
 
       - name: Test import
         run: uv run python -c "from openlr_decoder import RoadNetwork, Decoder, DecoderConfig, DecodedPath; print('Import successful')"
+
+  map-matcher-python:
+    name: map-matcher Python 3.12
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build wheel
+        run: uvx maturin build -m crates/map-matcher/Cargo.toml -i python3.12 -o dist
+
+      - name: Test
+        run: |
+          uv venv -p 3.12
+          uv pip install dist/*.whl pytest
+          uv run --no-project pytest -q crates/map-matcher/python/tests
