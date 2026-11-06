@@ -43,7 +43,9 @@ The core problem: A HERE OpenLR code encodes a location as a sequence of **Locat
    - **FRC** (weight 0.1): Functional Road Class should roughly match (±2 levels, low weight since HERE→OSM FRC mapping is approximate)
    - **FOW** (weight 0.1): Form of Way compatibility via substitution score matrix
 
-4. **Decoder** (`decoder.rs`): Uses bounded A* search to find paths between consecutive LRP candidate pairs, then selects the best overall path based on combined candidate scores and path length match.
+4. **ShortestPaths** (`routing.rs`): bounded one-to-many Dijkstra with a caller-supplied edge cost, reusing its per-node arrays between searches. Not used by the decoder; it's for map matching on the same network.
+
+5. **Decoder** (`decoder.rs`): Uses bounded A* search to find paths between consecutive LRP candidate pairs, then selects the best overall path based on combined candidate scores and path length match.
 
 ## OpenLR Concepts
 
