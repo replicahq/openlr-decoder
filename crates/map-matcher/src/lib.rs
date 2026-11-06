@@ -26,9 +26,21 @@ pub struct Ping {
     pub point: Point<f64>,
     /// Seconds from any fixed origin. Must not decrease along a trace.
     pub time_s: f64,
+    /// Treated as missing if not finite.
     pub speed_mps: Option<f64>,
-    /// Course over ground, degrees clockwise from north.
+    /// Course over ground, degrees clockwise from north. Treated as missing if
+    /// not finite.
     pub heading_deg: Option<f64>,
+}
+
+impl Ping {
+    fn speed(&self) -> Option<f64> {
+        self.speed_mps.filter(|v| v.is_finite())
+    }
+
+    fn heading(&self) -> Option<f64> {
+        self.heading_deg.filter(|h| h.is_finite())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -55,9 +67,15 @@ pub struct MatchConfig {
     /// Standard deviation of that speed, so the route distance tolerance grows
     /// with the time between pings.
     pub speed_sigma_mps: f64,
-    /// Routes longer than `max_speed_mps` × the time between pings (or the
-    /// straight-line distance + 200 m, if more) are not considered.
+    /// The route search between two pings stops at `max_speed_mps` × the time
+    /// between them (or the straight-line distance + 200 m, if more). The cap
+    /// applies to reaching the start of the target edge.
     pub max_speed_mps: f64,
+    /// Routes more than this much longer than the straight line between pings
+    /// are not considered either. This bounds the route search after a long
+    /// gap in the trace, where `max_speed_mps` alone would allow a search of
+    /// the whole network.
+    pub max_detour_m: f64,
     /// A later ping may project this far behind an earlier one on the same
     /// edge and still count as not moving, instead of having looped around.
     pub backward_slack_m: f64,
@@ -80,9 +98,45 @@ impl MatchConfig {
             use_speed: true,
             speed_sigma_mps: 4.0,
             max_speed_mps: 40.0,
+            max_detour_m: 2000.0,
             backward_slack_m: 3.0 * sigma_m,
             max_frc: Frc::Frc4,
         }
+    }
+}
+
+impl MatchConfig {
+    /// Checks that every distance, speed and scale is a positive (or for
+    /// `heading_kappa` and `backward_slack_m`, non-negative) finite number and
+    /// that `max_candidates` is at least 1.
+    pub fn validate(&self) -> Result<(), String> {
+        let positive = [
+            ("sigma_m", self.sigma_m),
+            ("search_radius_m", self.search_radius_m),
+            ("beta_m", self.beta_m),
+            ("speed_sigma_mps", self.speed_sigma_mps),
+            ("max_speed_mps", self.max_speed_mps),
+            ("max_detour_m", self.max_detour_m),
+        ];
+        let non_negative = [
+            ("heading_kappa", self.heading_kappa),
+            ("heading_min_speed_mps", self.heading_min_speed_mps),
+            ("backward_slack_m", self.backward_slack_m),
+        ];
+        for (name, v) in positive {
+            if !(v.is_finite() && v > 0.0) {
+                return Err(format!("{name} must be a positive number, got {v}"));
+            }
+        }
+        for (name, v) in non_negative {
+            if !(v.is_finite() && v >= 0.0) {
+                return Err(format!("{name} must be a non-negative number, got {v}"));
+            }
+        }
+        if self.max_candidates == 0 {
+            return Err("max_candidates must be at least 1".into());
+        }
+        Ok(())
     }
 }
 
@@ -131,6 +185,8 @@ pub struct MatchResult {
 pub enum MatchError {
     /// `pings[index]` is earlier than the ping before it.
     TimeDecreases { index: usize },
+    /// `pings[index].time_s` is NaN or infinite.
+    TimeNotFinite { index: usize },
 }
 
 impl std::fmt::Display for MatchError {
@@ -139,6 +195,7 @@ impl std::fmt::Display for MatchError {
             MatchError::TimeDecreases { index } => {
                 write!(f, "ping {index} is earlier than the ping before it")
             }
+            MatchError::TimeNotFinite { index } => write!(f, "ping {index} has a non-finite time"),
         }
     }
 }
@@ -166,6 +223,9 @@ impl<'a> Matcher<'a> {
 
     /// Match one trace. Safe to call from many threads at once.
     pub fn match_trace(&self, pings: &[Ping]) -> Result<MatchResult, MatchError> {
+        if let Some(i) = pings.iter().position(|p| !p.time_s.is_finite()) {
+            return Err(MatchError::TimeNotFinite { index: i });
+        }
         if let Some(i) = (1..pings.len()).find(|&i| pings[i].time_s < pings[i - 1].time_s) {
             return Err(MatchError::TimeDecreases { index: i });
         }

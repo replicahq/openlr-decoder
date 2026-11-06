@@ -154,3 +154,102 @@ fn test_rejects_decreasing_time() {
     );
     assert_eq!(m.match_trace(&[]).unwrap().segments.len(), 0);
 }
+
+/// A one-way loop: east along y=0 from 0 to 300 m (edge 1), then north
+/// 1500 m, west 300 m and south 1500 m back to the start (edges 2–4).
+fn one_way_loop() -> (RoadNetwork, SpatialIndex) {
+    let north = LAT + 1500.0 / 111_000.0;
+    TestNetworkBuilder::new()
+        .add_node(1, LAT, lon(0.0))
+        .add_node(2, LAT, lon(300.0))
+        .add_node(3, north, lon(300.0))
+        .add_node(4, north, lon(0.0))
+        .add_edge_auto_length(1, 1, 2, Frc::Frc3, Fow::SingleCarriageway)
+        .add_edge_auto_length(2, 2, 3, Frc::Frc3, Fow::SingleCarriageway)
+        .add_edge_auto_length(3, 3, 4, Frc::Frc3, Fow::SingleCarriageway)
+        .add_edge_auto_length(4, 4, 1, Frc::Frc3, Fow::SingleCarriageway)
+        .build()
+}
+
+#[test]
+fn test_max_detour_bounds_routes_after_a_long_gap() {
+    let (net, sp) = one_way_loop();
+    // An hour apart, the second ping 80 m behind the first on the one-way
+    // edge and 100 m from the loop's other legs: the only route is the 3.3 km
+    // loop.
+    let pings = vec![ping(280.0, 0.0, 0.0, None), ping(200.0, 0.0, 3600.0, None)];
+    let segments = |max_detour_m| {
+        let config = MatchConfig {
+            max_detour_m,
+            ..MatchConfig::with_sigma(5.0)
+        };
+        Matcher::new(&net, &sp, config)
+            .match_trace(&pings)
+            .unwrap()
+            .segments
+    };
+    assert_eq!(segments(2000.0).len(), 2, "loop exceeds the detour cap");
+    let joined = segments(5000.0);
+    assert_eq!(joined.len(), 1);
+    assert_eq!(ids(&net, &joined[0].edges), vec![1, 2, 3, 4, 1]);
+}
+
+#[test]
+fn test_non_finite_speed_and_heading_count_as_missing() {
+    let (net, sp) = two_way_road();
+    let m = Matcher::new(&net, &sp, MatchConfig::with_sigma(5.0));
+    let pings: Vec<Ping> = [20.0, 120.0, 220.0]
+        .iter()
+        .enumerate()
+        .map(|(i, &x)| Ping {
+            speed_mps: Some(if i == 1 { f64::NAN } else { 10.0 }),
+            heading_deg: Some(if i == 2 { f64::NAN } else { 90.0 }),
+            ..ping(x, 0.0, 10.0 * i as f64, None)
+        })
+        .collect();
+    let r = m.match_trace(&pings).unwrap();
+    assert_eq!(r.segments.len(), 1);
+    assert_eq!(ids(&net, &r.segments[0].edges), vec![1, 2, 3]);
+
+    let mut bad = pings.clone();
+    bad[2].time_s = f64::NAN;
+    assert_eq!(
+        m.match_trace(&bad),
+        Err(MatchError::TimeNotFinite { index: 2 })
+    );
+}
+
+#[test]
+fn test_end_offset_keeps_farthest_point_on_last_edge() {
+    let (net, sp) = two_way_road();
+    let m = Matcher::new(&net, &sp, MatchConfig::with_sigma(5.0));
+    // Drives onto edge 2, then the last fix jitters 4 m back.
+    let pings: Vec<Ping> = [50.0, 150.0, 146.0]
+        .iter()
+        .enumerate()
+        .map(|(i, &x)| ping(x, 0.0, 10.0 * i as f64, Some(90.0)))
+        .collect();
+    let seg = &m.match_trace(&pings).unwrap().segments[0];
+    assert_eq!(ids(&net, &seg.edges), vec![1, 2]);
+    assert!((seg.end_offset_m - 50.0).abs() < 1.0, "{seg:?}");
+}
+
+#[test]
+fn test_validate() {
+    assert!(MatchConfig::default().validate().is_ok());
+    let bad = MatchConfig {
+        beta_m: 0.0,
+        ..MatchConfig::default()
+    };
+    assert!(bad.validate().unwrap_err().contains("beta_m"));
+    let bad = MatchConfig {
+        backward_slack_m: f64::NAN,
+        ..MatchConfig::default()
+    };
+    assert!(bad.validate().unwrap_err().contains("backward_slack_m"));
+    let bad = MatchConfig {
+        max_candidates: 0,
+        ..MatchConfig::default()
+    };
+    assert!(bad.validate().is_err());
+}

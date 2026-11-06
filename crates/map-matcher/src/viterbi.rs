@@ -38,8 +38,10 @@ pub(crate) fn run(m: &Matcher, pings: &[Ping]) -> MatchResult {
             let p0 = &pings[prev.ping];
             let dt = ping.time_s - p0.time_s;
             let straight = straight_line_m(p0, ping);
-            let max_route = (c.max_speed_mps * dt).max(straight + 200.0);
-            let speed = match (p0.speed_mps, ping.speed_mps) {
+            let max_route = (c.max_speed_mps * dt)
+                .min(straight + c.max_detour_m)
+                .max(straight + 200.0);
+            let speed = match (p0.speed(), ping.speed()) {
                 (Some(v0), Some(v1)) if c.use_speed && dt > 0.0 => {
                     Some((0.5 * (v0 + v1) * dt, c.speed_sigma_mps * dt))
                 }
@@ -112,10 +114,16 @@ fn segments(layers: &[Layer], pick: &[usize]) -> Vec<MatchedSegment> {
         };
         match (&layer.back[j], out.last_mut()) {
             (Some((_, (_, between))), Some(seg)) => {
+                // Jitter back along the same edge doesn't undo progress.
+                let stayed = between.is_empty() && seg.edges.last() == Some(&cand.edge);
+                seg.end_offset_m = if stayed {
+                    seg.end_offset_m.max(cand.offset_m)
+                } else {
+                    cand.offset_m
+                };
                 for &e in between.iter().chain([&cand.edge]) {
                     push_edge(&mut seg.edges, e);
                 }
-                seg.end_offset_m = cand.offset_m;
                 seg.pings.push(matched);
             }
             _ => out.push(MatchedSegment {
@@ -124,13 +132,6 @@ fn segments(layers: &[Layer], pick: &[usize]) -> Vec<MatchedSegment> {
                 end_offset_m: cand.offset_m,
                 pings: vec![matched],
             }),
-        }
-    }
-    // A chain that stays on one edge may end up to the backward slack behind
-    // where it started; it didn't move.
-    for seg in &mut out {
-        if seg.edges.len() == 1 {
-            seg.end_offset_m = seg.end_offset_m.max(seg.start_offset_m);
         }
     }
     out

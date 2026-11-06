@@ -27,8 +27,8 @@ pub(crate) struct Candidate {
 pub(crate) fn candidates(m: &Matcher, ping: &Ping) -> Vec<Candidate> {
     let c = &m.config;
     let heading = ping
-        .heading_deg
-        .filter(|_| c.use_heading && ping.speed_mps.is_none_or(|v| v >= c.heading_min_speed_mps));
+        .heading()
+        .filter(|_| c.use_heading && ping.speed().is_none_or(|v| v >= c.heading_min_speed_mps));
 
     let mut out: Vec<Candidate> = m
         .spatial
@@ -81,7 +81,10 @@ thread_local! {
     static SEARCH: RefCell<ShortestPaths> = RefCell::new(ShortestPaths::new());
 }
 
-/// Routes from `from` to each of `to`, no longer than `max_m`. Moving forward
+/// Routes from `from` to each of `to` whose target edge starts within `max_m`.
+/// The distance along the target edge is not capped: enforcing the cap at the
+/// target point only splits more traces, since the transition score already
+/// penalises a long route. Moving forward
 /// along the same edge, or back by up to the backward slack, costs the
 /// distance moved (zero when moving back).
 pub(crate) fn routes(
