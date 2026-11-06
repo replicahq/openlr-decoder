@@ -1,0 +1,18 @@
+[package]
+name = "map-matcher"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "HMM map matching of GPS traces onto a road network"
+repository = "https://github.com/replicahq/openlr-decoder"
+publish = false
+
+[dependencies]
+road-network = { path = "../road-network" }
+geo = "0.33"
+petgraph = "0.8"
+
+[dev-dependencies]
+road-network = { path = "../road-network", features = ["test-utils"] }
+anyhow = "1"
+rayon = "1.10"

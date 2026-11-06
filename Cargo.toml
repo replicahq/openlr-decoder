@@ -13,7 +13,7 @@ path = "src/lib.rs"
 crate-type = ["cdylib", "rlib"]
 
 [workspace]
-members = [".", "crates/road-network"]
+members = [".", "crates/road-network", "crates/map-matcher"]
 
 [dependencies]
 road-network = { path = "crates/road-network" }
