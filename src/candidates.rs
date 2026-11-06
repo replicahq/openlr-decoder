@@ -77,13 +77,21 @@ pub fn find_candidates(
     spatial: &SpatialIndex,
     config: &CandidateConfig,
 ) -> Vec<Candidate> {
-    // Pad the box because find_nearby's meters-to-degrees conversion is approximate.
-    let nearby = spatial.find_nearby(coord, config.search_radius_m * 1.5);
+    let nearby = spatial.find_nearby(coord, config.search_radius_m);
 
     let mut candidates: Vec<Candidate> = nearby
         .into_iter()
         .filter_map(|env| {
             let edge = network.edge(env.edge_idx)?;
+
+            // Slip roads are exempt, as in the decoder's LFRCNP filter: HERE gives a
+            // ramp the class of the roads it joins (FRC0 between motorways), while
+            // the loader puts every motorway_link at Frc3. The mismatch still costs
+            // score.
+            let frc_diff = (edge.frc as i8 - frc as i8).unsigned_abs();
+            if frc_diff > config.frc_tolerance && edge.fow != Fow::SlipRoad {
+                return None;
+            }
 
             let proj = project_onto_line(coord, &edge.geometry)?;
             let distance_m = proj.distance_m;
@@ -96,15 +104,6 @@ pub fn find_candidates(
             let bearing_diff = bearing_difference(bearing, edge_bearing);
 
             if bearing_diff > config.max_bearing_diff {
-                return None;
-            }
-
-            // Slip roads are exempt, as in the decoder's LFRCNP filter: HERE gives a
-            // ramp the class of the roads it joins (FRC0 between motorways), while
-            // the loader puts every motorway_link at Frc3. The mismatch still costs
-            // score.
-            let frc_diff = (edge.frc as i8 - frc as i8).unsigned_abs();
-            if frc_diff > config.frc_tolerance && edge.fow != Fow::SlipRoad {
                 return None;
             }
 

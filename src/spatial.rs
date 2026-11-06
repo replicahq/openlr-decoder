@@ -6,6 +6,9 @@ use geo::{BoundingRect, Coord, Distance, Haversine, LineString, Point};
 use petgraph::graph::EdgeIndex;
 use rstar::{Envelope, RTree, RTreeObject, AABB};
 
+/// Earth radius used by geo's [`Haversine`], in meters.
+const EARTH_RADIUS_M: f64 = 6_371_008.8;
+
 /// An edge's bounding box, in degrees. The geometry stays in the graph's
 /// [`Edge`](crate::graph::Edge) so it isn't stored twice.
 #[derive(Debug, Clone)]
@@ -44,16 +47,21 @@ impl SpatialIndex {
         }
     }
 
-    /// Edges whose bounding box intersects a box extending `radius_m` from
-    /// `center` in each direction. The meters-to-degrees conversion is approximate,
-    /// so callers needing an exact radius should pad it and filter by true distance.
+    /// Edges whose bounding box intersects the bounding box of the circle of
+    /// `radius_m` around `center`. That includes every edge with a point within
+    /// `radius_m` by [`Haversine`] distance, plus some further away, so callers
+    /// filter by true distance.
     pub fn find_nearby(&self, center: Point<f64>, radius_m: f64) -> Vec<&EdgeEnvelope> {
-        let lat_rad = center.y().to_radians();
-        let meters_per_deg_lat = 111_132.0;
-        let meters_per_deg_lon = 111_132.0 * lat_rad.cos();
-
-        let delta_lat = radius_m / meters_per_deg_lat;
-        let delta_lon = radius_m / meters_per_deg_lon;
+        // Exact on the sphere Haversine uses: a circle of angular radius r around
+        // latitude φ spans ±r in latitude and ±asin(sin r / cos φ) in longitude.
+        let r = (radius_m / EARTH_RADIUS_M) * (1.0 + 1e-9);
+        let delta_lat = r.to_degrees();
+        let sin_ratio = r.sin() / center.y().to_radians().cos();
+        let delta_lon = if sin_ratio < 1.0 {
+            sin_ratio.asin().to_degrees()
+        } else {
+            180.0 // the circle reaches a pole
+        };
 
         let (min_lon, max_lon) = (center.x() - delta_lon, center.x() + delta_lon);
         let (min_lat, max_lat) = (center.y() - delta_lat, center.y() + delta_lat);
@@ -112,7 +120,7 @@ pub fn bearing_difference(b1: f64, b2: f64) -> f64 {
 pub struct LineProjection {
     /// The closest point on the line.
     pub point: Point<f64>,
-    /// Meters from the projected point to [`point`](Self::point).
+    /// Meters from the point that was projected to [`point`](Self::point).
     pub distance_m: f64,
     /// Meters along the line from its start to the closest point.
     pub along_m: f64,
@@ -138,36 +146,28 @@ pub fn project_onto_line(point: Point<f64>, line: &LineString<f64>) -> Option<Li
     if coords.len() < 2 {
         return None;
     }
-    let cum = cumulative_lengths(coords);
-
-    let mut best = LineProjection {
-        point: Point::from(coords[0]),
-        distance_m: f64::MAX,
-        along_m: 0.0,
-        length_m: *cum.last().unwrap(),
-    };
-    for i in 0..coords.len() - 1 {
-        let (closest, frac) =
-            project_point_to_segment(point, Point::from(coords[i]), Point::from(coords[i + 1]));
-        let dist = Haversine.distance(point, closest);
-        if dist < best.distance_m {
-            best.point = closest;
-            best.distance_m = dist;
-            best.along_m = cum[i] + frac * (cum[i + 1] - cum[i]);
-        }
-    }
-    Some(best)
-}
-
-/// Meters along the line at each vertex.
-fn cumulative_lengths(coords: &[Coord<f64>]) -> Vec<f64> {
-    let mut cum = Vec::with_capacity(coords.len());
-    cum.push(0.0);
+    // Segments are compared by the same scaled planar distance the projection
+    // minimises; only the winner's distance is converted to meters.
+    let k = point.y().to_radians().cos();
+    let mut best = (Point::from(coords[0]), f64::MAX, 0.0);
+    let mut length_m = 0.0;
     for w in coords.windows(2) {
-        let d = Haversine.distance(Point::from(w[0]), Point::from(w[1]));
-        cum.push(cum.last().unwrap() + d);
+        let (a, b) = (Point::from(w[0]), Point::from(w[1]));
+        let (closest, t) = project_point_to_segment(point, a, b);
+        let dx = wrap_lon(closest.x() - point.x()) * k;
+        let dy = closest.y() - point.y();
+        let seg_m = Haversine.distance(a, b);
+        if dx * dx + dy * dy < best.1 {
+            best = (closest, dx * dx + dy * dy, length_m + t * seg_m);
+        }
+        length_m += seg_m;
     }
-    cum
+    Some(LineProjection {
+        point: best.0,
+        distance_m: Haversine.distance(point, best.0),
+        along_m: best.2,
+        length_m,
+    })
 }
 
 /// Wrap a longitude, or a longitude difference, into [-180, 180]. Applied to
@@ -230,26 +230,17 @@ pub fn bearing_along(
     chord_m: f64,
     direction: BearingDirection,
 ) -> f64 {
-    use geo::{Bearing, Geodesic};
-
     let coords = &line.0;
     if coords.len() < 2 {
         return 0.0;
     }
-    let cum = cumulative_lengths(coords);
-    let total = *cum.last().unwrap();
 
-    let proj = point_at_distance(coords, &cum, along_m);
-    let chord = |dir: BearingDirection| -> Option<(Point<f64>, Point<f64>)> {
+    let [back, at, ahead] =
+        points_at_distances(coords, [along_m - chord_m, along_m, along_m + chord_m]);
+    let chord = |dir: BearingDirection| {
         let (a, b) = match dir {
-            BearingDirection::Forward => (
-                proj,
-                point_at_distance(coords, &cum, (along_m + chord_m).min(total)),
-            ),
-            BearingDirection::Backward => (
-                point_at_distance(coords, &cum, (along_m - chord_m).max(0.0)),
-                proj,
-            ),
+            BearingDirection::Forward => (at, ahead),
+            BearingDirection::Backward => (back, at),
         };
         (Haversine.distance(a, b) > 0.5).then_some((a, b))
     };
@@ -261,28 +252,49 @@ pub fn bearing_along(
         return 0.0;
     };
 
-    Geodesic.bearing(a, b)
+    local_bearing(a, b)
 }
 
-/// The point `dist` meters along a polyline whose vertices are `cum` meters along.
-fn point_at_distance(coords: &[Coord<f64>], cum: &[f64], dist: f64) -> Point<f64> {
-    let dist = dist.clamp(0.0, *cum.last().unwrap());
-    for i in 0..coords.len() - 1 {
-        if dist <= cum[i + 1] {
-            let seg = cum[i + 1] - cum[i];
-            let t = if seg > 0.0 {
-                (dist - cum[i]) / seg
+/// Bearing in degrees [0, 360) from `a` to `b` on the WGS84 ellipsoid, treating
+/// the short span between them as flat. Over 50 m it is within 0.002° of geo's
+/// `Geodesic` up to 80° latitude, at a fraction of the cost.
+fn local_bearing(a: Point<f64>, b: Point<f64>) -> f64 {
+    // East and north meters per degree are N·cos(φ) and M, the prime vertical
+    // and meridian radii of curvature. Only their ratio matters here:
+    // N·cos(φ) / M = cos(φ)·(1 − e²·sin²φ) / (1 − e²).
+    const E2: f64 = 6.694_379_990_141_316e-3; // WGS84 first eccentricity squared
+    let phi = ((a.y() + b.y()) / 2.0).to_radians();
+    let (sin_phi, cos_phi) = phi.sin_cos();
+    let east_per_north = cos_phi * (1.0 - E2 * sin_phi * sin_phi) / (1.0 - E2);
+    let east = wrap_lon(b.x() - a.x()) * east_per_north;
+    let north = b.y() - a.y();
+    east.atan2(north).to_degrees().rem_euclid(360.0)
+}
+
+/// The points at each of `dists` meters along a polyline, in one pass.
+/// `dists` must be ascending; each is clamped to the line.
+fn points_at_distances<const N: usize>(coords: &[Coord<f64>], dists: [f64; N]) -> [Point<f64>; N] {
+    let mut out = [Point::from(*coords.last().unwrap()); N];
+    let mut next = 0;
+    let mut start_m = 0.0;
+    for w in coords.windows(2) {
+        let seg_m = Haversine.distance(Point::from(w[0]), Point::from(w[1]));
+        while next < N && dists[next] <= start_m + seg_m {
+            let t = if seg_m > 0.0 {
+                ((dists[next] - start_m) / seg_m).max(0.0)
             } else {
                 0.0
             };
-            let dx = wrap_lon(coords[i + 1].x - coords[i].x);
-            return Point::new(
-                wrap_lon(coords[i].x + t * dx),
-                coords[i].y + t * (coords[i + 1].y - coords[i].y),
-            );
+            let dx = wrap_lon(w[1].x - w[0].x);
+            out[next] = Point::new(wrap_lon(w[0].x + t * dx), w[0].y + t * (w[1].y - w[0].y));
+            next += 1;
         }
+        if next == N {
+            break;
+        }
+        start_m += seg_m;
     }
-    Point::from(*coords.last().unwrap())
+    out
 }
 
 #[cfg(test)]
@@ -394,10 +406,11 @@ mod tests {
         let p = Point::new(-94.49970, 39.00027);
         let b = bearing_at_projection(p, &kinked_line(), BearingDirection::Forward);
         assert!((b - 90.0).abs() < 2.0, "got {b}");
-        // At the very end, Forward has no chord and falls back to Backward.
+        // At the very end, Forward has no chord and falls back to Backward,
+        // the last 20 m of the 30 m east leg.
         let p = Point::new(-94.49965, 39.00027);
         let b = bearing_at_projection(p, &kinked_line(), BearingDirection::Forward);
-        assert!(b > 60.0 && b < 90.0, "got {b}");
+        assert!((b - 90.0).abs() < 0.01, "got {b}");
     }
 
     #[test]
@@ -407,6 +420,54 @@ mod tests {
         let f = bearing_at_projection(p, &line, BearingDirection::Forward);
         let b = bearing_at_projection(p, &line, BearingDirection::Backward);
         assert!(f.abs() < 0.5 && b.abs() < 0.5, "got {f} {b}");
+    }
+
+    #[test]
+    fn test_local_bearing_matches_geodesic() {
+        use geo::{Bearing, Destination, Geodesic};
+        for lat in [0.0, 39.0, 60.0, -45.0, 80.0] {
+            for deg in (0..360).step_by(15) {
+                let a = Point::new(-94.5, lat);
+                let b = Geodesic.destination(a, deg as f64, 50.0);
+                let got = local_bearing(a, b);
+                let diff = bearing_difference(got, Geodesic.bearing(a, b));
+                assert!(diff < 0.002, "lat {lat} bearing {deg}: {got} off by {diff}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_find_nearby_box_holds_the_circle() {
+        use geo::Destination;
+        // A tiny edge at every point on a circle of the query radius, at several
+        // latitudes, must be found. Distances just inside the radius are the
+        // ones an under-sized box would miss.
+        for lat in [0.0, 39.0, 70.0, -85.0] {
+            let center = Point::new(10.0, lat);
+            let mut envs = Vec::new();
+            for (i, deg) in (0..360).step_by(5).enumerate() {
+                let p = Haversine.destination(center, deg as f64, 99.999);
+                let line = LineString::from(vec![p, p]);
+                envs.push(EdgeEnvelope::new(EdgeIndex::new(i), &line));
+            }
+            let n = envs.len();
+            let idx = SpatialIndex::new(envs);
+            assert_eq!(idx.find_nearby(center, 100.0).len(), n, "lat {lat}");
+        }
+    }
+
+    #[test]
+    fn test_points_at_distances_one_pass() {
+        // kinked_line: 30 m north, then 30 m east.
+        let coords = &kinked_line().0;
+        let [before, mid, kink, after] = points_at_distances(coords, [-5.0, 15.0, 30.0, 100.0]);
+        assert_eq!(before, Point::from(coords[0]));
+        assert!(
+            (mid.y() - 39.000135).abs() < 1e-6 && mid.x() == -94.5,
+            "{mid:?}"
+        );
+        assert!((kink.y() - 39.00027).abs() < 1e-6, "{kink:?}");
+        assert_eq!(after, Point::from(coords[2]));
     }
 
     #[test]
