@@ -110,6 +110,8 @@ impl PyRoadNetwork {
 ///         the pings' average speed × the time between them.
 ///     speed_sigma_mps: Tolerance of that speed match.
 ///     max_speed_mps: Routes faster than this between pings are not considered.
+///     max_detour_m: Nor are routes this much longer than the straight line,
+///         which bounds the search after a long gap in a trace.
 ///     backward_slack_m: How far a ping may project behind the previous one
 ///         on the same edge and still count as stopped. Default 3 × sigma_m.
 ///     max_frc: Least important road class matched, 0 (motorway) to 7.
@@ -133,6 +135,7 @@ impl PyMatchConfig {
         use_speed = true,
         speed_sigma_mps = 4.0,
         max_speed_mps = 40.0,
+        max_detour_m = 2000.0,
         backward_slack_m = None,
         max_frc = 4,
     ))]
@@ -148,32 +151,31 @@ impl PyMatchConfig {
         use_speed: bool,
         speed_sigma_mps: f64,
         max_speed_mps: f64,
+        max_detour_m: f64,
         backward_slack_m: Option<f64>,
         max_frc: u8,
     ) -> PyResult<Self> {
-        if sigma_m.is_nan() || sigma_m <= 0.0 {
-            return Err(PyValueError::new_err("sigma_m must be positive"));
-        }
         if max_frc > 7 {
             return Err(PyValueError::new_err("max_frc must be 0 to 7"));
         }
         let base = MatchConfig::with_sigma(sigma_m);
-        Ok(PyMatchConfig {
-            config: MatchConfig {
-                search_radius_m: search_radius_m.unwrap_or(base.search_radius_m),
-                max_candidates,
-                beta_m,
-                use_heading,
-                heading_kappa,
-                heading_min_speed_mps,
-                use_speed,
-                speed_sigma_mps,
-                max_speed_mps,
-                backward_slack_m: backward_slack_m.unwrap_or(base.backward_slack_m),
-                max_frc: Frc::from_u8(max_frc),
-                ..base
-            },
-        })
+        let config = MatchConfig {
+            search_radius_m: search_radius_m.unwrap_or(base.search_radius_m),
+            max_candidates,
+            beta_m,
+            use_heading,
+            heading_kappa,
+            heading_min_speed_mps,
+            use_speed,
+            speed_sigma_mps,
+            max_speed_mps,
+            max_detour_m,
+            backward_slack_m: backward_slack_m.unwrap_or(base.backward_slack_m),
+            max_frc: Frc::from_u8(max_frc),
+            ..base
+        };
+        config.validate().map_err(PyValueError::new_err)?;
+        Ok(PyMatchConfig { config })
     }
 
     fn __repr__(&self) -> String {
@@ -181,7 +183,8 @@ impl PyMatchConfig {
         format!(
             "MatchConfig(sigma_m={}, search_radius_m={}, max_candidates={}, beta_m={}, \
              use_heading={}, heading_kappa={}, heading_min_speed_mps={}, use_speed={}, \
-             speed_sigma_mps={}, max_speed_mps={}, backward_slack_m={}, max_frc={})",
+             speed_sigma_mps={}, max_speed_mps={}, max_detour_m={}, backward_slack_m={}, \
+             max_frc={})",
             c.sigma_m,
             c.search_radius_m,
             c.max_candidates,
@@ -192,6 +195,7 @@ impl PyMatchConfig {
             py_bool(c.use_speed),
             c.speed_sigma_mps,
             c.max_speed_mps,
+            c.max_detour_m,
             c.backward_slack_m,
             c.max_frc as u8,
         )
@@ -239,8 +243,9 @@ impl PyMatcher {
     ///         - time: a timestamp, or seconds as a number. Must not decrease
     ///           within a trace.
     ///         - lat, lon: degrees.
-    ///         - speed (optional): m/s, may be null.
-    ///         - heading (optional): degrees clockwise from north, may be null.
+    ///         - speed (optional): m/s. Null or NaN means unknown.
+    ///         - heading (optional): degrees clockwise from north. Null or NaN
+    ///           means unknown.
     ///
     /// Returns:
     ///     pyarrow.RecordBatch with one row per matched segment, a stretch of a
@@ -256,8 +261,8 @@ impl PyMatcher {
     ///     Rows outside every segment's span also had no road nearby.
     ///
     /// Raises:
-    ///     ValueError: If a column is missing, has nulls where not allowed, or
-    ///         time decreases within a trace.
+    ///     ValueError: If a column is missing, time, lat or lon is null or not
+    ///         finite, or time decreases within a trace.
     ///     TypeError: If a column has an unsupported type.
     fn match_traces(&self, py: Python<'_>, pings: PyRecordBatchReader) -> PyResult<Py<PyAny>> {
         let reader = pings.into_reader().map_err(arrow_read_error)?;
@@ -291,18 +296,17 @@ impl PyMatcher {
         let time = seconds(column("time")?)?;
         let lat = floats(column("lat")?, "lat")?;
         let lon = floats(column("lon")?, "lon")?;
-        let speed = batch
-            .column_by_name("speed")
-            .map(|c| floats(c, "speed"))
-            .transpose()?;
-        let heading = batch
-            .column_by_name("heading")
-            .map(|c| floats(c, "heading"))
-            .transpose()?;
+        let speed = optional_floats(batch, "speed")?;
+        let heading = optional_floats(batch, "heading")?;
         for (name, col) in [("time", &time), ("lat", &lat), ("lon", &lon)] {
             if let Some(row) = (0..col.len()).find(|&i| col.is_null(i)) {
                 return Err(PyValueError::new_err(format!(
                     "Column '{name}' is null at row {row}"
+                )));
+            }
+            if let Some(row) = (0..col.len()).find(|&i| !col.value(i).is_finite()) {
+                return Err(PyValueError::new_err(format!(
+                    "Column '{name}' is not a finite number at row {row}"
                 )));
             }
         }
@@ -329,6 +333,10 @@ impl PyMatcher {
                 matcher.match_trace(&pings).map_err(|e| match e {
                     MatchError::TimeDecreases { index } => PyValueError::new_err(format!(
                         "time decreases at row {} within its trace",
+                        r.start + index
+                    )),
+                    MatchError::TimeNotFinite { index } => PyValueError::new_err(format!(
+                        "Column 'time' is not a finite number at row {}",
                         r.start + index
                     )),
                 })
@@ -424,6 +432,16 @@ fn floats(col: &ArrayRef, name: &str) -> PyResult<Float64Array> {
     let f = cast(col, &DataType::Float64)
         .map_err(|e| PyTypeError::new_err(format!("Column '{name}': {e}")))?;
     Ok(f.as_primitive::<Float64Type>().clone())
+}
+
+/// An optional numeric column as float64. A column of only nulls (Arrow's
+/// null type) counts as absent.
+fn optional_floats(batch: &RecordBatch, name: &str) -> PyResult<Option<Float64Array>> {
+    match batch.column_by_name(name) {
+        None => Ok(None),
+        Some(c) if c.data_type() == &DataType::Null => Ok(None),
+        Some(c) => floats(c, name).map(Some),
+    }
 }
 
 /// The `time` column in seconds: a timestamp of any unit, or a number.

@@ -120,12 +120,45 @@ def test_errors(network):
     with pytest.raises(TypeError, match="'lat' must be numeric"):
         bad = pings([1], [20], [0]).set_column(2, "lat", pa.array(["x"]))
         matcher.match_traces(bad)
-    with pytest.raises(ValueError, match="sigma_m must be positive"):
-        MatchConfig(sigma_m=0)
+    with pytest.raises(ValueError, match="'lon' is not a finite number at row 0"):
+        bad = pings([1], [20], [0]).set_column(3, "lon", pa.array([float("nan")]))
+        matcher.match_traces(bad)
+    with pytest.raises(ValueError, match="'time' is not a finite number at row 1"):
+        bad = pa.table({"trace_id": [1, 1], "time": [0.0, float("inf")], "lat": [LAT] * 2, "lon": [lon(20)] * 2})
+        matcher.match_traces(bad)
+
+
+@pytest.mark.parametrize(
+    "kwargs, message",
+    [
+        ({"sigma_m": 0}, "sigma_m must be a positive number"),
+        ({"beta_m": -1}, "beta_m must be a positive number"),
+        ({"max_detour_m": float("nan")}, "max_detour_m must be a positive number"),
+        ({"backward_slack_m": -5}, "backward_slack_m must be a non-negative number"),
+        ({"max_candidates": 0}, "max_candidates must be at least 1"),
+        ({"max_frc": 8}, "max_frc must be 0 to 7"),
+    ],
+)
+def test_config_validation(kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        MatchConfig(**kwargs)
+
+
+def test_nan_and_all_null_speed_heading_are_unknown(network):
+    matcher = Matcher(network, MatchConfig(sigma_m=5.0))
+    nan = float("nan")
+    table = pings([1, 1, 1], [20, 120, 220], [0, 10, 20], speed=[10.0, nan, 10.0], heading=[90.0, 90.0, nan])
+    out = matcher.match_traces(table).to_pylist()
+    assert len(out) == 1 and out[0]["edge_ids"] == [1, 2, 3]
+    table = pings([1, 1, 1], [20, 120, 220], [0, 10, 20], speed=[None] * 3, heading=[None] * 3)
+    assert table.schema.field("speed").type == pa.null()
+    out = matcher.match_traces(table).to_pylist()
+    assert out[0]["edge_ids"] == [1, 2, 3]
 
 
 def test_config_repr_and_defaults():
     r = repr(MatchConfig(sigma_m=20))
     assert "search_radius_m=80" in r
     assert "backward_slack_m=60" in r
+    assert "max_detour_m=2000" in r
     assert "use_heading=True" in r
