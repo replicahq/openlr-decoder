@@ -73,9 +73,17 @@ fn matchable(edge: &Edge, m: &Matcher) -> bool {
     edge.frc <= m.config.max_frc
 }
 
-/// A route from one candidate to another: its length and the edges strictly
-/// between the two candidates' edges.
-pub(crate) type Route = (f64, Vec<EdgeIndex>);
+/// A route from one candidate to another.
+#[derive(Debug, Clone)]
+pub(crate) struct Route {
+    pub len_m: f64,
+    /// The edges strictly between the two candidates' edges.
+    pub between: Vec<EdgeIndex>,
+    /// Both candidates are on the same edge and the route doesn't leave it:
+    /// the vehicle moved forward along it, or jittered back within the
+    /// backward slack.
+    pub same_edge: bool,
+}
 
 thread_local! {
     static SEARCH: RefCell<ShortestPaths> = RefCell::new(ShortestPaths::new());
@@ -84,9 +92,8 @@ thread_local! {
 /// Routes from `from` to each of `to` whose target edge starts within `max_m`.
 /// The distance along the target edge is not capped: enforcing the cap at the
 /// target point only splits more traces, since the transition score already
-/// penalises a long route. Moving forward
-/// along the same edge, or back by up to the backward slack, costs the
-/// distance moved (zero when moving back).
+/// penalises a long route. Moving forward along the same edge, or back by up
+/// to the backward slack, costs the distance moved (zero when moving back).
 pub(crate) fn routes(
     m: &Matcher,
     from: &Candidate,
@@ -100,7 +107,11 @@ pub(crate) fn routes(
     let mut targets: Vec<(NodeIndex, Vec<usize>)> = Vec::new();
     for (j, b) in to.iter().enumerate() {
         if b.edge == from.edge && b.offset_m >= from.offset_m - m.config.backward_slack_m {
-            out[j] = Some(((b.offset_m - from.offset_m).max(0.0), Vec::new()));
+            out[j] = Some(Route {
+                len_m: (b.offset_m - from.offset_m).max(0.0),
+                between: Vec::new(),
+                same_edge: true,
+            });
             continue;
         }
         let Some(node) = net.edge_source(b.edge) else {
@@ -133,7 +144,11 @@ pub(crate) fn routes(
                 continue;
             };
             for &j in js {
-                out[j] = Some((cost + to[j].offset_m, edges.clone()));
+                out[j] = Some(Route {
+                    len_m: cost + to[j].offset_m,
+                    between: edges.clone(),
+                    same_edge: false,
+                });
             }
         }
     });

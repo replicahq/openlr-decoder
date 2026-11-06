@@ -253,3 +253,28 @@ fn test_validate() {
     };
     assert!(bad.validate().is_err());
 }
+
+#[test]
+fn test_impossible_jump_breaks_the_chain() {
+    let (net, sp) = two_way_road();
+    let m = Matcher::new(&net, &sp, MatchConfig::with_sigma(5.0));
+    // 260 m in 1 s is far beyond 40 m/s plus GPS slack, though the road connects.
+    let jump = vec![ping(20.0, 0.0, 0.0, None), ping(280.0, 0.0, 1.0, None)];
+    assert_eq!(m.match_trace(&jump).unwrap().segments.len(), 2);
+    // The same pings 10 s apart are drivable.
+    let drive = vec![ping(20.0, 0.0, 0.0, None), ping(280.0, 0.0, 10.0, None)];
+    assert_eq!(m.match_trace(&drive).unwrap().segments.len(), 1);
+}
+
+#[test]
+fn test_match_trace_rejects_invalid_config() {
+    let (net, sp) = two_way_road();
+    let config = MatchConfig {
+        sigma_m: 0.0,
+        ..MatchConfig::default()
+    };
+    let err = Matcher::new(&net, &sp, config)
+        .match_trace(&[ping(20.0, 0.0, 0.0, None)])
+        .unwrap_err();
+    assert!(matches!(err, MatchError::InvalidConfig(ref r) if r.contains("sigma_m")));
+}

@@ -187,6 +187,8 @@ pub enum MatchError {
     TimeDecreases { index: usize },
     /// `pings[index].time_s` is NaN or infinite.
     TimeNotFinite { index: usize },
+    /// The [`MatchConfig`] failed [`MatchConfig::validate`].
+    InvalidConfig(String),
 }
 
 impl std::fmt::Display for MatchError {
@@ -196,6 +198,7 @@ impl std::fmt::Display for MatchError {
                 write!(f, "ping {index} is earlier than the ping before it")
             }
             MatchError::TimeNotFinite { index } => write!(f, "ping {index} has a non-finite time"),
+            MatchError::InvalidConfig(reason) => write!(f, "invalid MatchConfig: {reason}"),
         }
     }
 }
@@ -223,6 +226,7 @@ impl<'a> Matcher<'a> {
 
     /// Match one trace. Safe to call from many threads at once.
     pub fn match_trace(&self, pings: &[Ping]) -> Result<MatchResult, MatchError> {
+        self.config.validate().map_err(MatchError::InvalidConfig)?;
         if let Some(i) = pings.iter().position(|p| !p.time_s.is_finite()) {
             return Err(MatchError::TimeNotFinite { index: i });
         }
