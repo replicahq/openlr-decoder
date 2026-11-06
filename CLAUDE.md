@@ -18,6 +18,9 @@ decoder and its Python bindings). The road network it decodes onto lives in
 and `loader.rs` below are in `crates/road-network/src/`, and `openlr_decoder`
 re-exports them under the same module names. That crate is meant to stay free
 of OpenLR decoding logic so it can be reused for map matching.
+`crates/map-matcher` is an HMM GPS map matcher on the same network; see its
+crate docs, and `cargo run --release -p map-matcher --example evaluate --
+NETWORK.parquet` for accuracy on synthetic traces.
 
 ```
 ┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
