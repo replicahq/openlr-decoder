@@ -16,7 +16,7 @@ mod python;
 pub use batch::{decode_batch, BatchLayout};
 pub use candidates::{find_candidates, Candidate, CandidateConfig};
 pub use decoder::{DecodeError, DecodedPath, Decoder, DecoderConfig};
-pub use graph::{Edge, Node, RoadNetwork};
+pub use graph::{Edge, Node, RoadNetwork, RoadNetworkBuilder};
 pub use loader::{load_network_from_parquet, load_openlr_codes, road_network_schema};
 pub use road_class::{Fow, Frc};
 pub use routing::ShortestPaths;

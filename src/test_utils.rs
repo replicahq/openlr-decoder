@@ -16,7 +16,7 @@
 //! assert_eq!(network.edge_count(), 1);
 //! ```
 
-use crate::graph::{Edge, Node, RoadNetwork};
+use crate::graph::{Edge, RoadNetwork, RoadNetworkBuilder};
 use crate::road_class::{Fow, Frc};
 use crate::spatial::{EdgeEnvelope, SpatialIndex};
 use geo::{LineString, Point};
@@ -154,11 +154,10 @@ impl TestNetworkBuilder {
 
     /// Panics if any edge references a node that was never added.
     pub fn build(self) -> (RoadNetwork, SpatialIndex) {
-        let mut network = RoadNetwork::new();
+        let mut network = RoadNetworkBuilder::new();
 
         for (&id, &(lat, lon)) in &self.nodes {
-            let coord = Point::new(lon, lat);
-            network.add_node(Node { id, coord });
+            network.get_or_add_node(id, Point::new(lon, lat));
         }
 
         let mut envelopes = Vec::new();
@@ -190,7 +189,9 @@ impl TestNetworkBuilder {
                 edge.length_m = length;
             }
 
-            let edge_idx = network.add_edge(pending.start_node, pending.end_node, edge);
+            let from = network.node_index(pending.start_node).unwrap();
+            let to = network.node_index(pending.end_node).unwrap();
+            let edge_idx = network.add_edge(from, to, edge);
 
             let edge_geom = &network.edge(edge_idx).unwrap().geometry;
             envelopes.push(EdgeEnvelope::new(edge_idx, edge_geom));
@@ -198,7 +199,7 @@ impl TestNetworkBuilder {
 
         let spatial = SpatialIndex::new(envelopes);
 
-        (network, spatial)
+        (network.finish(), spatial)
     }
 }
 
@@ -233,13 +234,8 @@ mod tests {
             .add_edge(100, 1, 2, 5000.0, Frc::Frc2, Fow::SingleCarriageway)
             .build();
 
-        let edge_idx = network
-            .edge_id_to_index
-            .as_ref()
-            .unwrap()
-            .get(&100)
-            .unwrap();
-        let edge = network.edge(*edge_idx).unwrap();
+        let edge_idx = network.find_edge_by_id(100).unwrap();
+        let edge = network.edge(edge_idx).unwrap();
 
         assert_eq!(edge.id, 100);
         assert_eq!(edge.frc, Frc::Frc2);
@@ -255,13 +251,8 @@ mod tests {
             .add_edge_auto_length(100, 1, 2, Frc::Frc2, Fow::SingleCarriageway)
             .build();
 
-        let edge_idx = network
-            .edge_id_to_index
-            .as_ref()
-            .unwrap()
-            .get(&100)
-            .unwrap();
-        let edge = network.edge(*edge_idx).unwrap();
+        let edge_idx = network.find_edge_by_id(100).unwrap();
+        let edge = network.edge(edge_idx).unwrap();
 
         // 1 degree of longitude at 52° lat is roughly 68km
         assert!(edge.length_m > 60000.0 && edge.length_m < 75000.0);

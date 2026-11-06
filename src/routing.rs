@@ -182,28 +182,31 @@ impl Ord for HeapItem {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::RoadNetworkBuilder;
     use crate::road_class::{Fow, Frc};
     use geo::{LineString, Point};
 
     /// 0 → 1 → 2 → 3 along a line, 0 → 3 directly as a long detour, and a
     /// one-way spur 2 → 4. Lengths in meters are roughly 111 per 0.001°.
     fn line_network() -> (RoadNetwork, Vec<NodeIndex>) {
-        let mut net = RoadNetwork::new();
+        let mut net = RoadNetworkBuilder::new();
         let nodes: Vec<_> = (0..5)
             .map(|i| net.get_or_add_node(i, Point::new(0.001 * i as f64, 0.0)))
             .collect();
-        let mut add = |a: i64, b: i64, frc: Frc, id: u64| {
-            let pa = net.node(nodes[a as usize]).unwrap().coord;
-            let pb = net.node(nodes[b as usize]).unwrap().coord;
-            let geom = LineString::from(vec![pa, pb]);
-            net.add_edge(a, b, Edge::new(id, geom, frc, Fow::SingleCarriageway));
+        let mut add = |a: usize, b: usize, frc: Frc, id: u64| {
+            let geom = LineString::from(vec![(0.001 * a as f64, 0.0), (0.001 * b as f64, 0.0)]);
+            net.add_edge(
+                nodes[a],
+                nodes[b],
+                Edge::new(id, geom, frc, Fow::SingleCarriageway),
+            );
         };
         add(0, 1, Frc::Frc4, 1);
         add(1, 2, Frc::Frc4, 2);
         add(2, 3, Frc::Frc4, 3);
         add(0, 3, Frc::Frc0, 4);
         add(2, 4, Frc::Frc4, 5);
-        (net, nodes)
+        (net.finish(), nodes)
     }
 
     fn length(e: &Edge) -> Option<f64> {

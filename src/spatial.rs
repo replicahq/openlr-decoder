@@ -352,15 +352,15 @@ mod tests {
 
     #[test]
     fn test_find_nearby_across_antimeridian() {
-        use crate::graph::{Edge, RoadNetwork};
+        use crate::graph::{Edge, RoadNetworkBuilder};
         use crate::road_class::{Fow, Frc};
-        let mut net = RoadNetwork::new();
-        net.get_or_add_node(1, Point::new(-179.9999, 0.0));
-        net.get_or_add_node(2, Point::new(-179.999, 0.0));
+        let mut net = RoadNetworkBuilder::new();
+        let a = net.get_or_add_node(1, Point::new(-179.9999, 0.0));
+        let b = net.get_or_add_node(2, Point::new(-179.999, 0.0));
         let geom = LineString::from(vec![(-179.9999, 0.0), (-179.999, 0.0)]);
         let edge_idx = net.add_edge(
-            1,
-            2,
+            a,
+            b,
             Edge::new(1, geom.clone(), Frc::Frc4, Fow::SingleCarriageway),
         );
         let idx = SpatialIndex::new(vec![EdgeEnvelope::new(edge_idx, &geom)]);
