@@ -182,7 +182,7 @@ impl Ord for HeapItem {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::{Fow, Frc};
+    use crate::road_class::{Fow, Frc};
     use geo::{LineString, Point};
 
     /// 0 → 1 → 2 → 3 along a line, 0 → 3 directly as a long detour, and a

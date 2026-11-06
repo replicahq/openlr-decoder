@@ -16,7 +16,8 @@
 //! assert_eq!(network.edge_count(), 1);
 //! ```
 
-use crate::graph::{Edge, Fow, Frc, Node, RoadNetwork};
+use crate::graph::{Edge, Node, RoadNetwork};
+use crate::road_class::{Fow, Frc};
 use crate::spatial::{EdgeEnvelope, SpatialIndex};
 use geo::{LineString, Point};
 use std::collections::HashMap;

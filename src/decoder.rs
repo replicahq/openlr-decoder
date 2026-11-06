@@ -7,7 +7,8 @@ use petgraph::visit::EdgeRef;
 use thiserror::Error;
 
 use crate::candidates::{find_candidates, Candidate, CandidateConfig};
-use crate::graph::{Fow, Frc, RoadNetwork};
+use crate::graph::RoadNetwork;
+use crate::road_class::{Fow, Frc};
 use crate::spatial::{BearingDirection, SpatialIndex};
 
 #[derive(Clone)]
@@ -1100,7 +1101,7 @@ impl<'a> Decoder<'a> {
 mod tests {
     use super::*;
     use crate::candidates::Candidate;
-    use crate::graph::{Fow, Frc};
+    use crate::road_class::{Fow, Frc};
     use crate::test_utils::TestNetworkBuilder;
 
     #[test]
