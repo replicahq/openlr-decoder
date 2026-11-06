@@ -7,10 +7,21 @@ description = "HMM map matching of GPS traces onto a road network"
 repository = "https://github.com/replicahq/openlr-decoder"
 publish = false
 
+[lib]
+name = "map_matcher"
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
 road-network = { path = "../road-network" }
 geo = "0.33"
 petgraph = "0.8"
+arrow = { version = "59", optional = true }
+pyo3 = { version = "0.30", features = ["extension-module"], optional = true }
+pyo3-arrow = { version = "0.20", optional = true }
+rayon = { version = "1.10", optional = true }
+
+[features]
+python = ["arrow", "pyo3", "pyo3-arrow", "rayon"]
 
 [dev-dependencies]
 road-network = { path = "../road-network", features = ["test-utils"] }
