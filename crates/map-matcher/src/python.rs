@@ -1,5 +1,7 @@
 //! PyO3 bindings, built as the `map_matcher._map_matcher` extension module.
 
+use std::collections::HashSet;
+use std::ops::Range;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -9,15 +11,16 @@ use arrow::array::{
 };
 use arrow::compute::{cast, concat_batches, partition, take};
 use arrow::datatypes::{DataType, Field, Float64Type, Int64Type, Schema, TimeUnit};
+use arrow::row::{RowConverter, SortField};
 use geo::Point;
 use pyo3::exceptions::{PyOSError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3_arrow::{PyRecordBatch, PyRecordBatchReader};
+use pyo3_arrow::{PyRecordBatch, PyRecordBatchReader, PySchema};
 use rayon::prelude::*;
 use road_network::loader::{load_network_from_parquet, NetworkBuilder};
 use road_network::{Frc, RoadNetwork, SpatialIndex};
 
-use crate::{MatchConfig, MatchError, MatchResult, Matcher, Ping};
+use crate::{MatchConfig, MatchResult, Matcher, Ping};
 
 /// A road network graph and its spatial index. Build one with `from_parquet`
 /// or `from_arrow`.
@@ -30,7 +33,7 @@ pub struct PyRoadNetwork {
 #[pymethods]
 impl PyRoadNetwork {
     /// Load a road network from a parquet file with the columns of
-    /// `openlr_decoder.road_network_schema()`.
+    /// `road_network_schema()`.
     ///
     /// Raises:
     ///     OSError: If the file cannot be opened.
@@ -238,8 +241,8 @@ impl PyMatcher {
     ///
     /// Args:
     ///     pings: Arrow data (PyArrow Table, Polars DataFrame, ...) with columns
-    ///         - trace_id: any type. A trace is a run of consecutive rows with
-    ///           the same trace_id, so sort or group by it first.
+    ///         - trace_id: any type. Each trace's rows must be contiguous, so
+    ///           sort or group by trace_id first.
     ///         - time: a timestamp, or seconds as a number. Must not decrease
     ///           within a trace.
     ///         - lat, lon: degrees.
@@ -248,9 +251,14 @@ impl PyMatcher {
     ///           means unknown.
     ///
     /// Returns:
-    ///     pyarrow.RecordBatch with one row per matched segment, a stretch of a
-    ///     trace matched as one connected path. A trace splits into several
-    ///     segments where no plausible route connects consecutive pings.
+    ///     pyarrow.RecordBatch with one row per segment, a stretch of a trace
+    ///     matched as one connected path. A trace splits into several segments
+    ///     where no plausible route connects consecutive pings. Each input row
+    ///     belongs to exactly one output row: a segment's span runs from the row
+    ///     after the previous segment's last matched ping (or the trace's first
+    ///     row) to its own last matched ping (or the trace's last row, for the
+    ///     last segment). A trace with no matched ping gives one row with empty
+    ///     edge_ids and null offsets.
     ///     - trace_id: same type as the input
     ///     - segment: uint32, 0-based within the trace
     ///     - first_row, last_row: uint64, the input rows the segment spans
@@ -258,22 +266,26 @@ impl PyMatcher {
     ///     - start_offset_m: float64, meters along the first edge where the path starts
     ///     - end_offset_m: float64, meters along the last edge where it ends
     ///     - unmatched_rows: list<uint64>, rows in the span with no road nearby
-    ///     Rows outside every segment's span also had no road nearby.
     ///
     /// Raises:
-    ///     ValueError: If a column is missing, time, lat or lon is null or not
-    ///         finite, or time decreases within a trace.
+    ///     ValueError: If a column is missing; time, lat or lon is null or not
+    ///         finite; time decreases within a trace; or a trace_id appears in
+    ///         two separate runs of rows. The message gives the first such row.
     ///     TypeError: If a column has an unsupported type.
     fn match_traces(&self, py: Python<'_>, pings: PyRecordBatchReader) -> PyResult<Py<PyAny>> {
+        // Read the stream with the GIL held, since its producer may be Python;
+        // combining and matching touch no Python objects.
         let reader = pings.into_reader().map_err(arrow_read_error)?;
         let schema = reader.schema();
         let batches = reader
             .collect::<Result<Vec<_>, _>>()
             .map_err(arrow_read_error)?;
-        let batch = concat_batches(&schema, &batches)
-            .map_err(|e| PyValueError::new_err(format!("Failed to combine Arrow batches: {e}")))?;
-
-        let out = py.detach(|| self.match_batch(&batch))?;
+        let out = py.detach(|| {
+            let batch = concat_batches(&schema, &batches).map_err(|e| {
+                PyValueError::new_err(format!("Failed to combine Arrow batches: {e}"))
+            })?;
+            self.match_batch(&batch)
+        })?;
         PyRecordBatch::new(out)
             .into_pyarrow(py)
             .map(|b| b.unbind())
@@ -311,9 +323,16 @@ impl PyMatcher {
             }
         }
 
-        let ranges = partition(std::slice::from_ref(&trace_id))
-            .map_err(|e| PyTypeError::new_err(format!("Cannot group by trace_id: {e}")))?
-            .ranges();
+        let ranges = traces(&trace_id)?;
+        // Check time order up front, so the error names the first bad row
+        // rather than whichever trace a worker thread hit first.
+        for r in &ranges {
+            if let Some(row) = (r.start + 1..r.end).find(|&i| time.value(i) < time.value(i - 1)) {
+                return Err(PyValueError::new_err(format!(
+                    "time decreases at row {row} within its trace"
+                )));
+            }
+        }
 
         let ping = |i: usize| Ping {
             point: Point::new(lon.value(i), lat.value(i)),
@@ -330,16 +349,10 @@ impl PyMatcher {
             .par_iter()
             .map(|r| {
                 let pings: Vec<Ping> = r.clone().map(ping).collect();
-                matcher.match_trace(&pings).map_err(|e| match e {
-                    MatchError::TimeDecreases { index } => PyValueError::new_err(format!(
-                        "time decreases at row {} within its trace",
-                        r.start + index
-                    )),
-                    MatchError::TimeNotFinite { index } => PyValueError::new_err(format!(
-                        "Column 'time' is not a finite number at row {}",
-                        r.start + index
-                    )),
-                })
+                // Inputs were validated above, so this only fails on a bug.
+                matcher
+                    .match_trace(&pings)
+                    .map_err(|e| PyValueError::new_err(e.to_string()))
             })
             .collect::<PyResult<_>>()?;
 
@@ -349,7 +362,7 @@ impl PyMatcher {
     fn segments_batch(
         &self,
         trace_id: &ArrayRef,
-        ranges: &[std::ops::Range<usize>],
+        ranges: &[Range<usize>],
         results: &[MatchResult],
     ) -> PyResult<RecordBatch> {
         let mut id_rows = Vec::new();
@@ -363,25 +376,42 @@ impl PyMatcher {
 
         for (range, result) in ranges.iter().zip(results) {
             let row = |i: usize| (range.start + i) as u64;
-            for (k, seg) in result.segments.iter().enumerate() {
-                let first = seg.pings.first().map_or(0, |p| p.index);
-                let last = seg.pings.last().map_or(0, |p| p.index);
+            let n = range.len();
+            // `result.unmatched` is sorted, so one cursor walks it across spans.
+            let mut next_unmatched = result.unmatched.iter().peekable();
+            let mut span_start = 0;
+            let segments = result.segments.len().max(1);
+            for k in 0..segments {
+                let seg = result.segments.get(k);
+                let span_end = match seg {
+                    Some(seg) if k + 1 < result.segments.len() => {
+                        seg.pings.last().map_or(n - 1, |p| p.index)
+                    }
+                    _ => n - 1,
+                };
                 id_rows.push(row(0));
                 segment.push(k as u32);
-                first_row.push(row(first));
-                last_row.push(row(last));
-                start_offset.push(seg.start_offset_m);
-                end_offset.push(seg.end_offset_m);
-                for &e in &seg.edges {
-                    edge_ids
-                        .values()
-                        .append_value(self.network.edge(e).map_or(0, |e| e.id));
+                first_row.push(row(span_start));
+                last_row.push(row(span_end));
+                start_offset.push(seg.map(|s| s.start_offset_m));
+                end_offset.push(seg.map(|s| s.end_offset_m));
+                for &e in seg.map_or(&[][..], |s| &s.edges) {
+                    let edge = self
+                        .network
+                        .edge(e)
+                        .expect("matched edge is in the network");
+                    edge_ids.values().append_value(edge.id);
                 }
                 edge_ids.append(true);
-                for &i in result.unmatched.iter().filter(|&&i| first < i && i < last) {
+                while let Some(&&i) = next_unmatched.peek() {
+                    if i > span_end {
+                        break;
+                    }
                     unmatched.values().append_value(row(i));
+                    next_unmatched.next();
                 }
                 unmatched.append(true);
+                span_start = span_end + 1;
             }
         }
 
@@ -400,8 +430,8 @@ impl PyMatcher {
             Field::new("first_row", DataType::UInt64, false),
             Field::new("last_row", DataType::UInt64, false),
             list("edge_ids"),
-            Field::new("start_offset_m", DataType::Float64, false),
-            Field::new("end_offset_m", DataType::Float64, false),
+            Field::new("start_offset_m", DataType::Float64, true),
+            Field::new("end_offset_m", DataType::Float64, true),
             list("unmatched_rows"),
         ]);
         RecordBatch::try_new(
@@ -419,6 +449,37 @@ impl PyMatcher {
         )
         .map_err(|e| PyValueError::new_err(format!("Failed to build result: {e}")))
     }
+}
+
+/// The row range of each trace: each run of equal trace_ids. A trace_id that
+/// comes back after other ids is an error, since its pings would otherwise be
+/// matched as two unrelated traces.
+fn traces(trace_id: &ArrayRef) -> PyResult<Vec<Range<usize>>> {
+    let ranges = partition(std::slice::from_ref(trace_id))
+        .map_err(|e| PyTypeError::new_err(format!("Cannot group by trace_id: {e}")))?
+        .ranges();
+    let converter = RowConverter::new(vec![SortField::new(trace_id.data_type().clone())])
+        .map_err(|e| PyTypeError::new_err(format!("Cannot group by trace_id: {e}")))?;
+    let firsts: Vec<ArrayRef> = vec![take(
+        trace_id.as_ref(),
+        &UInt64Array::from_iter_values(ranges.iter().map(|r| r.start as u64)),
+        None,
+    )
+    .map_err(|e| PyValueError::new_err(format!("Failed to read trace_id: {e}")))?];
+    let rows = converter
+        .convert_columns(&firsts)
+        .map_err(|e| PyTypeError::new_err(format!("Cannot group by trace_id: {e}")))?;
+    let mut seen = HashSet::with_capacity(ranges.len());
+    for (k, r) in ranges.iter().enumerate() {
+        if !seen.insert(rows.row(k)) {
+            return Err(PyValueError::new_err(format!(
+                "trace_id at row {} also appears in earlier rows that are not \
+                 adjacent; sort or group the pings by trace_id",
+                r.start
+            )));
+        }
+    }
+    Ok(ranges)
 }
 
 /// A numeric column as float64.
@@ -466,8 +527,20 @@ fn arrow_read_error(e: impl std::fmt::Display) -> PyErr {
     PyValueError::new_err(format!("Failed to read Arrow data: {e}"))
 }
 
+/// The PyArrow schema `RoadNetwork.from_parquet` and `RoadNetwork.from_arrow`
+/// expect. `lanes` and `geometry` are optional, and `geometry` may also be WKT
+/// or GeoArrow.
+#[pyfunction]
+fn road_network_schema(py: Python<'_>) -> PyResult<Py<PyAny>> {
+    PySchema::new(Arc::new(road_network::road_network_schema()))
+        .into_pyarrow(py)
+        .map(|b| b.unbind())
+        .map_err(|e| PyValueError::new_err(format!("Failed to convert schema: {e}")))
+}
+
 #[pymodule]
 fn _map_matcher(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(road_network_schema, m)?)?;
     m.add_class::<PyRoadNetwork>()?;
     m.add_class::<PyMatchConfig>()?;
     m.add_class::<PyMatcher>()?;

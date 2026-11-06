@@ -27,6 +27,9 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: Clippy (map-matcher Python bindings)
+        run: cargo clippy -p map-matcher --features python --all-targets -- -D warnings
+
       - name: Build
         run: cargo build --workspace
 

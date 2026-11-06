@@ -12,6 +12,6 @@ Example:
     >>> pl.from_arrow(segments)
 """
 
-from map_matcher._map_matcher import MatchConfig, Matcher, RoadNetwork
+from map_matcher._map_matcher import MatchConfig, Matcher, RoadNetwork, road_network_schema
 
-__all__ = ["MatchConfig", "Matcher", "RoadNetwork"]
+__all__ = ["MatchConfig", "Matcher", "RoadNetwork", "road_network_schema"]

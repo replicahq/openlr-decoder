@@ -162,3 +162,44 @@ def test_config_repr_and_defaults():
     assert "backward_slack_m=60" in r
     assert "max_detour_m=2000" in r
     assert "use_heading=True" in r
+
+
+def test_every_row_belongs_to_one_output_row(network):
+    matcher = Matcher(network, MatchConfig(sigma_m=5.0))
+    off_road = LAT + 500 / 111_000
+    table = pings([1] * 5 + [2] * 2, [20, 20, 120, 220, 220, 20, 120], [0, 5, 10, 20, 25, 0, 10])
+    lats = [off_road, LAT, LAT, LAT, off_road, off_road, off_road]
+    table = table.set_column(2, "lat", pa.array(lats))
+    out = matcher.match_traces(table).to_pylist()
+    # Trace 1: leading and trailing unmatched rows fall in its only segment's span.
+    assert (out[0]["first_row"], out[0]["last_row"]) == (0, 4)
+    assert out[0]["unmatched_rows"] == [0, 4]
+    assert out[0]["edge_ids"] == [1, 2, 3]
+    # Trace 2: nothing matched, so one row with no path.
+    assert out[1]["trace_id"] == 2
+    assert (out[1]["first_row"], out[1]["last_row"]) == (5, 6)
+    assert out[1]["edge_ids"] == []
+    assert out[1]["start_offset_m"] is None
+    assert out[1]["unmatched_rows"] == [5, 6]
+
+
+def test_trace_id_must_be_contiguous(network):
+    table = pings(["a", "b", "a"], [20, 20, 120], [0, 0, 10])
+    with pytest.raises(ValueError, match="trace_id at row 2 also appears in earlier rows"):
+        Matcher(network).match_traces(table)
+
+
+def test_first_bad_row_is_reported(network):
+    # Several traces with decreasing time; the error names the earliest.
+    ids = [i // 2 for i in range(200)]
+    secs = [0 if i % 2 else 10 for i in range(200)]
+    table = pings(ids, [20] * 200, secs)
+    for _ in range(5):
+        with pytest.raises(ValueError, match="time decreases at row 1 "):
+            Matcher(network).match_traces(table)
+
+
+def test_road_network_schema():
+    from map_matcher import road_network_schema
+
+    assert "stableEdgeId" in road_network_schema().names
