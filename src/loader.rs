@@ -18,7 +18,8 @@ use geozero::{wkb, wkt, ToGeo};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use rayon::prelude::*;
 
-use crate::graph::{Edge, Fow, Frc, RoadNetwork};
+use crate::graph::{Edge, RoadNetwork};
+use crate::road_class::{Fow, Frc};
 use crate::spatial::{EdgeEnvelope, SpatialIndex};
 
 enum GeometryFormat<'a> {

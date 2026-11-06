@@ -352,7 +352,8 @@ mod tests {
 
     #[test]
     fn test_find_nearby_across_antimeridian() {
-        use crate::graph::{Edge, Fow, Frc, RoadNetwork};
+        use crate::graph::{Edge, RoadNetwork};
+        use crate::road_class::{Fow, Frc};
         let mut net = RoadNetwork::new();
         net.get_or_add_node(1, Point::new(-179.9999, 0.0));
         net.get_or_add_node(2, Point::new(-179.999, 0.0));

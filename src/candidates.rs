@@ -1,7 +1,8 @@
 use geo::Point;
 use petgraph::graph::EdgeIndex;
 
-use crate::graph::{Fow, Frc, RoadNetwork};
+use crate::graph::RoadNetwork;
+use crate::road_class::{Fow, Frc};
 use crate::spatial::{
     bearing_along, bearing_difference, project_onto_line, BearingDirection, SpatialIndex,
 };
