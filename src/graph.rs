@@ -8,7 +8,8 @@ use petgraph::visit::EdgeRef;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::road_class::{Fow, Frc};
+// Re-exported so `graph::Frc` and `graph::Fow` keep working.
+pub use crate::road_class::{Fow, Frc};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Node {
