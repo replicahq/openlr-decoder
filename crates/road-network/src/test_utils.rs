@@ -3,8 +3,8 @@
 //! # Example
 //!
 //! ```rust
-//! use openlr_decoder::test_utils::TestNetworkBuilder;
-//! use openlr_decoder::{Frc, Fow};
+//! use road_network::test_utils::TestNetworkBuilder;
+//! use road_network::{Frc, Fow};
 //!
 //! let (network, spatial) = TestNetworkBuilder::new()
 //!     .add_node(1, 52.622875, 13.49214)

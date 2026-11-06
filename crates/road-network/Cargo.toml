@@ -1,0 +1,29 @@
+[package]
+name = "road-network"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Directed road graph with spatial index and shortest paths, loaded from parquet"
+repository = "https://github.com/replicahq/openlr-decoder"
+publish = false
+
+[dependencies]
+petgraph = "0.8"
+rstar = "0.14"
+geo = { version = "0.33", features = ["serde"] }
+parquet = { version = "59", features = ["arrow"] }
+arrow = { version = "59", features = ["ffi"] }
+geozero = { version = "0.15", features = ["with-wkb", "with-wkt", "with-geo"] }
+geoarrow-array = "0.9"
+geoarrow-schema = "0.9"
+geo-traits = "0.3"
+rayon = "1.10"
+serde = { version = "1", features = ["derive"] }
+anyhow = "1"
+
+[features]
+# Exposes `test_utils` (a small network builder) to dependent crates' tests.
+test-utils = []
+
+[dev-dependencies]
+road-network = { path = ".", features = ["test-utils"] }

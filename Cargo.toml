@@ -12,21 +12,17 @@ name = "openlr_decoder"
 path = "src/lib.rs"
 crate-type = ["cdylib", "rlib"]
 
+[workspace]
+members = [".", "crates/road-network"]
+
 [dependencies]
+road-network = { path = "crates/road-network" }
 openlr = "0.4"
 petgraph = "0.8"
-rstar = "0.14"
 geo = { version = "0.33", features = ["serde"] }
-geo-types = { version = "0.7", features = ["serde"] }
 parquet = { version = "59", features = ["arrow"] }
 arrow = { version = "59", features = ["ffi"] }
-geozero = { version = "0.15", features = ["with-wkb", "with-wkt", "with-geo"] }
-geoarrow-array = "0.9"
-geoarrow-schema = "0.9"
-geo-traits = "0.3"
 rayon = "1.10"
-ahash = "0.8"
-serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 anyhow = "1"
 pyo3 = { version = "0.30", features = ["extension-module"], optional = true }
@@ -36,12 +32,11 @@ pyo3-arrow = { version = "0.20", optional = true }
 default = []
 python = ["pyo3", "pyo3-arrow"]
 # Exposes `test_utils` to integration tests (enabled via the self dev-dependency).
-test-utils = []
+test-utils = ["road-network/test-utils"]
 
 [dev-dependencies]
-criterion = { version = "0.8", features = ["html_reports"] }
-serde_json = "1"
 openlr_decoder = { path = ".", features = ["test-utils"] }
+road-network = { path = "crates/road-network", features = ["test-utils"] }
 
 [profile.release]
 lto = true
