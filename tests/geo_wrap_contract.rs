@@ -31,3 +31,14 @@ fn geo_ops_are_wrap_safe_across_antimeridian() {
     println!("haversine across 180: {d:.1}m");
     assert!(d < 100.0, "haversine_distance NOT wrap-safe: {d:.0}m");
 }
+
+/// Paths that existed before the road network moved to its own crate.
+#[test]
+fn test_old_module_paths_still_resolve() {
+    #[allow(unused_imports)]
+    use openlr_decoder::graph::{Edge, Fow, Frc, RoadNetwork};
+    #[allow(unused_imports)]
+    use openlr_decoder::loader::{load_network_from_parquet, load_openlr_codes, NetworkBuilder};
+    #[allow(unused_imports)]
+    use openlr_decoder::spatial::{project_onto_line, SpatialIndex};
+}
