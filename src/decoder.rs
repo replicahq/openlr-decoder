@@ -1125,7 +1125,7 @@ mod tests {
             .add_edge(3, 3, 4, 100.0, Frc::Frc4, Fow::SingleCarriageway)
             .build();
         let decoder = Decoder::new(&network, &spatial);
-        let idx = |id| *network.edge_id_to_index.as_ref().unwrap().get(&id).unwrap();
+        let idx = |id| network.find_edge_by_id(id).unwrap();
         let candidate = |edge_idx, projection_fraction| Candidate {
             edge_idx,
             distance_m: 0.0,
@@ -1185,24 +1185,9 @@ mod tests {
             ..DecoderConfig::default()
         });
 
-        let service_edge_idx = *network
-            .edge_id_to_index
-            .as_ref()
-            .unwrap()
-            .get(&100)
-            .unwrap();
-        let secondary_edge_idx = *network
-            .edge_id_to_index
-            .as_ref()
-            .unwrap()
-            .get(&101)
-            .unwrap();
-        let end_edge_idx = *network
-            .edge_id_to_index
-            .as_ref()
-            .unwrap()
-            .get(&102)
-            .unwrap();
+        let service_edge_idx = network.find_edge_by_id(100).unwrap();
+        let secondary_edge_idx = network.find_edge_by_id(101).unwrap();
+        let end_edge_idx = network.find_edge_by_id(102).unwrap();
 
         let service_candidate = Candidate {
             edge_idx: service_edge_idx,
@@ -1268,8 +1253,8 @@ mod tests {
             .add_edge(2, 2, 3, 150.0, Frc::Frc3, Fow::SingleCarriageway)
             .build();
 
-        let start = *network.node_id_to_index.as_ref().unwrap().get(&1).unwrap();
-        let goal = *network.node_id_to_index.as_ref().unwrap().get(&3).unwrap();
+        let start = network.find_node_by_id(1).unwrap();
+        let goal = network.find_node_by_id(3).unwrap();
         let goal_coord = network.node(goal).unwrap().coord;
 
         let result = bounded_astar(
@@ -1309,8 +1294,8 @@ mod tests {
             .add_edge(2, 2, 3, 150.0, Frc::Frc3, Fow::SingleCarriageway)
             .build();
 
-        let start = *network.node_id_to_index.as_ref().unwrap().get(&1).unwrap();
-        let goal = *network.node_id_to_index.as_ref().unwrap().get(&3).unwrap();
+        let start = network.find_node_by_id(1).unwrap();
+        let goal = network.find_node_by_id(3).unwrap();
         let goal_coord = network.node(goal).unwrap().coord;
 
         let result = bounded_astar(
@@ -1341,8 +1326,8 @@ mod tests {
             .add_edge(3, 3, 4, 50.0, Frc::Frc3, Fow::SingleCarriageway)
             .build();
 
-        let start = *network.node_id_to_index.as_ref().unwrap().get(&1).unwrap();
-        let goal = *network.node_id_to_index.as_ref().unwrap().get(&4).unwrap();
+        let start = network.find_node_by_id(1).unwrap();
+        let goal = network.find_node_by_id(4).unwrap();
         let goal_coord = network.node(goal).unwrap().coord;
 
         let result = bounded_astar(
@@ -1382,8 +1367,8 @@ mod tests {
             .add_edge(4, 3, 4, 150.0, Frc::Frc3, Fow::SingleCarriageway)
             .build();
 
-        let start = *network.node_id_to_index.as_ref().unwrap().get(&1).unwrap();
-        let goal = *network.node_id_to_index.as_ref().unwrap().get(&4).unwrap();
+        let start = network.find_node_by_id(1).unwrap();
+        let goal = network.find_node_by_id(4).unwrap();
         let goal_coord = network.node(goal).unwrap().coord;
 
         let result = bounded_astar(
@@ -1404,7 +1389,7 @@ mod tests {
         );
         assert_eq!(nodes.len(), 3, "Shortest path has 3 nodes");
 
-        let node2_idx = *network.node_id_to_index.as_ref().unwrap().get(&2).unwrap();
+        let node2_idx = network.find_node_by_id(2).unwrap();
         assert!(
             nodes.contains(&node2_idx),
             "Path should go through node 2 (shorter route)"
@@ -1424,8 +1409,8 @@ mod tests {
             .add_edge(102, 2, 3, 20.0, Frc::Frc3, Fow::SingleCarriageway)
             .build();
 
-        let start = *network.node_id_to_index.as_ref().unwrap().get(&1).unwrap();
-        let goal = *network.node_id_to_index.as_ref().unwrap().get(&3).unwrap();
+        let start = network.find_node_by_id(1).unwrap();
+        let goal = network.find_node_by_id(3).unwrap();
         let goal_coord = network.node(goal).unwrap().coord;
 
         let result = bounded_astar(
@@ -1461,7 +1446,7 @@ mod tests {
             .add_edge(1, 1, 2, 100.0, Frc::Frc3, Fow::SingleCarriageway)
             .build();
 
-        let start = *network.node_id_to_index.as_ref().unwrap().get(&1).unwrap();
+        let start = network.find_node_by_id(1).unwrap();
         let goal = start;
         let goal_coord = network.node(goal).unwrap().coord;
 
@@ -1493,8 +1478,8 @@ mod tests {
             .add_edge(2, 3, 4, 100.0, Frc::Frc3, Fow::SingleCarriageway)
             .build();
 
-        let start = *network.node_id_to_index.as_ref().unwrap().get(&1).unwrap();
-        let goal = *network.node_id_to_index.as_ref().unwrap().get(&4).unwrap();
+        let start = network.find_node_by_id(1).unwrap();
+        let goal = network.find_node_by_id(4).unwrap();
         let goal_coord = network.node(goal).unwrap().coord;
 
         let result = bounded_astar(
@@ -1529,8 +1514,8 @@ mod tests {
             .add_edge(4, 3, 4, 75.0, Frc::Frc5, Fow::SingleCarriageway)
             .build();
 
-        let start = *network.node_id_to_index.as_ref().unwrap().get(&1).unwrap();
-        let goal = *network.node_id_to_index.as_ref().unwrap().get(&4).unwrap();
+        let start = network.find_node_by_id(1).unwrap();
+        let goal = network.find_node_by_id(4).unwrap();
         let goal_coord = network.node(goal).unwrap().coord;
 
         let result_no_filter = bounded_astar(
@@ -1571,8 +1556,8 @@ mod tests {
             cost_filtered
         );
 
-        let node2_idx = *network.node_id_to_index.as_ref().unwrap().get(&2).unwrap();
-        let node3_idx = *network.node_id_to_index.as_ref().unwrap().get(&3).unwrap();
+        let node2_idx = network.find_node_by_id(2).unwrap();
+        let node3_idx = network.find_node_by_id(3).unwrap();
         assert!(nodes.contains(&node2_idx), "Path should go through node 2");
         assert!(
             !nodes.contains(&node3_idx),
@@ -1593,8 +1578,8 @@ mod tests {
             .add_edge(4, 3, 4, 75.0, Frc::Frc7, Fow::SingleCarriageway)
             .build();
 
-        let start = *network.node_id_to_index.as_ref().unwrap().get(&1).unwrap();
-        let goal = *network.node_id_to_index.as_ref().unwrap().get(&4).unwrap();
+        let start = network.find_node_by_id(1).unwrap();
+        let goal = network.find_node_by_id(4).unwrap();
         let goal_coord = network.node(goal).unwrap().coord;
 
         let result = bounded_astar(
@@ -1625,8 +1610,8 @@ mod tests {
             .add_edge(1, 1, 2, 100.0, Frc::Frc5, Fow::SingleCarriageway)
             .build();
 
-        let start = *network.node_id_to_index.as_ref().unwrap().get(&1).unwrap();
-        let goal = *network.node_id_to_index.as_ref().unwrap().get(&2).unwrap();
+        let start = network.find_node_by_id(1).unwrap();
+        let goal = network.find_node_by_id(2).unwrap();
         let goal_coord = network.node(goal).unwrap().coord;
 
         let result = bounded_astar(
@@ -1676,8 +1661,8 @@ mod tests {
             .add_edge(4, 3, 4, 60.0, Frc::Frc3, Fow::SingleCarriageway)
             .build();
 
-        let start = *network.node_id_to_index.as_ref().unwrap().get(&1).unwrap();
-        let goal = *network.node_id_to_index.as_ref().unwrap().get(&4).unwrap();
+        let start = network.find_node_by_id(1).unwrap();
+        let goal = network.find_node_by_id(4).unwrap();
         let goal_coord = network.node(goal).unwrap().coord;
 
         let result_no_penalty = bounded_astar(
@@ -1716,8 +1701,8 @@ mod tests {
             cost_with_penalty
         );
 
-        let node2_idx = *network.node_id_to_index.as_ref().unwrap().get(&2).unwrap();
-        let node3_idx = *network.node_id_to_index.as_ref().unwrap().get(&3).unwrap();
+        let node2_idx = network.find_node_by_id(2).unwrap();
+        let node3_idx = network.find_node_by_id(3).unwrap();
         assert!(
             nodes_no_penalty.contains(&node2_idx),
             "No penalty path should use slip road (node 2)"
@@ -1737,8 +1722,8 @@ mod tests {
             .add_edge(1, 1, 2, 100.0, Frc::Frc3, Fow::SlipRoad)
             .build();
 
-        let start = *network.node_id_to_index.as_ref().unwrap().get(&1).unwrap();
-        let goal = *network.node_id_to_index.as_ref().unwrap().get(&2).unwrap();
+        let start = network.find_node_by_id(1).unwrap();
+        let goal = network.find_node_by_id(2).unwrap();
         let goal_coord = network.node(goal).unwrap().coord;
 
         let result = bounded_astar(
@@ -1777,8 +1762,8 @@ mod tests {
             .add_edge(4, 3, 4, 60.0, Frc::Frc4, Fow::SingleCarriageway)
             .build();
 
-        let start = *network.node_id_to_index.as_ref().unwrap().get(&1).unwrap();
-        let goal = *network.node_id_to_index.as_ref().unwrap().get(&4).unwrap();
+        let start = network.find_node_by_id(1).unwrap();
+        let goal = network.find_node_by_id(4).unwrap();
         let goal_coord = network.node(goal).unwrap().coord;
 
         let result_no_penalty = bounded_astar(
@@ -1817,7 +1802,7 @@ mod tests {
             cost_with_penalty
         );
 
-        let node3_idx = *network.node_id_to_index.as_ref().unwrap().get(&3).unwrap();
+        let node3_idx = network.find_node_by_id(3).unwrap();
         assert!(
             nodes_with_penalty.contains(&node3_idx),
             "With penalty, path should use tertiary road (node 3)"
@@ -1845,8 +1830,8 @@ mod tests {
             .add_edge(100, 1, 2, 5.0, Frc::Frc3, Fow::SingleCarriageway)
             .add_edge(101, 2, 3, 5.0, Frc::Frc3, Fow::SingleCarriageway)
             .build();
-        let ids = network.edge_id_to_index.as_ref().unwrap();
-        let (e1, e2) = (ids[&100], ids[&101]);
+        let e1 = network.find_edge_by_id(100).unwrap();
+        let e2 = network.find_edge_by_id(101).unwrap();
         (network, spatial, e1, e2)
     }
 
@@ -1951,8 +1936,8 @@ mod tests {
             .add_edge(100, 1, 2, 100.0, Frc::Frc3, Fow::SingleCarriageway)
             .add_edge(101, 3, 4, 100.0, Frc::Frc3, Fow::SingleCarriageway)
             .build();
-        let ids = network.edge_id_to_index.as_ref().unwrap();
-        let (e1, e2) = (ids[&100], ids[&101]);
+        let e1 = network.find_edge_by_id(100).unwrap();
+        let e2 = network.find_edge_by_id(101).unwrap();
         let decoder = Decoder::new(&network, &spatial);
 
         // 20 m away, so try_same_edge_solution passes them over.
@@ -2006,7 +1991,7 @@ mod tests {
     }
 
     fn edge_by_id(network: &RoadNetwork, id: u64) -> EdgeIndex {
-        *network.edge_id_to_index.as_ref().unwrap().get(&id).unwrap()
+        network.find_edge_by_id(id).unwrap()
     }
 
     fn ids(network: &RoadNetwork, path: &[EdgeIndex]) -> Vec<u64> {

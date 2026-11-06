@@ -18,9 +18,10 @@ use geozero::{wkb, wkt, ToGeo};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use rayon::prelude::*;
 
-use crate::graph::{Edge, RoadNetwork};
+use crate::graph::{Edge, RoadNetwork, RoadNetworkBuilder};
 use crate::road_class::{Fow, Frc};
 use crate::spatial::{EdgeEnvelope, SpatialIndex};
+use petgraph::graph::NodeIndex;
 
 enum GeometryFormat<'a> {
     Wkb(WkbSource<'a>),
@@ -120,7 +121,7 @@ where
 /// process it, and drop it before fetching the next, so the whole stream is
 /// never held in memory.
 pub struct NetworkBuilder {
-    network: RoadNetwork,
+    network: RoadNetworkBuilder,
     edge_envelopes: Vec<EdgeEnvelope>,
 }
 
@@ -130,11 +131,7 @@ impl NetworkBuilder {
         // Road networks have roughly as many nodes as edges.
         let node_hint = edge_count_hint;
 
-        let network = if edge_count_hint > 0 {
-            RoadNetwork::new_with_capacity(node_hint, edge_count_hint)
-        } else {
-            RoadNetwork::new()
-        };
+        let network = RoadNetworkBuilder::with_capacity(node_hint, edge_count_hint);
 
         NetworkBuilder {
             network,
@@ -146,12 +143,12 @@ impl NetworkBuilder {
         process_batch(batch, &mut self.network, &mut self.edge_envelopes)
     }
 
-    pub fn finish(mut self) -> (RoadNetwork, SpatialIndex) {
-        // Drop the id maps before the R-tree bulk load to lower peak memory.
-        self.network.compact();
+    pub fn finish(self) -> (RoadNetwork, SpatialIndex) {
+        // Drop the node id map before the R-tree bulk load to lower peak memory.
+        let network = self.network.finish();
         let spatial_index = SpatialIndex::new(self.edge_envelopes);
 
-        (self.network, spatial_index)
+        (network, spatial_index)
     }
 }
 
@@ -164,14 +161,14 @@ impl Default for NetworkBuilder {
 /// An edge built in the parallel phase of [`process_batch`], waiting for
 /// sequential insertion into the graph.
 struct PendingEdge {
-    sv_id: i64,
-    ev_id: i64,
+    from: NodeIndex,
+    to: NodeIndex,
     edge: Edge,
 }
 
 fn process_batch(
     batch: &RecordBatch,
-    network: &mut RoadNetwork,
+    network: &mut RoadNetworkBuilder,
     edge_envelopes: &mut Vec<EdgeEnvelope>,
 ) -> Result<()> {
     fn require_column<'a, T: 'static>(batch: &'a RecordBatch, name: &str) -> Result<&'a T> {
@@ -232,27 +229,27 @@ fn process_batch(
 
     // Add nodes in row order, so a given input always yields the same node
     // indices. The first coordinate seen for a node id wins.
-    for row in 0..batch.num_rows() {
-        if skip_row(row) {
-            continue;
-        }
-        let start = Point::new(start_lon.value(row), start_lat.value(row));
-        let end = Point::new(end_lon.value(row), end_lat.value(row));
-        network.get_or_add_node(start_vertex.value(row), start);
-        network.get_or_add_node(end_vertex.value(row), end);
-    }
+    let endpoints: Vec<Option<(NodeIndex, NodeIndex)>> = (0..batch.num_rows())
+        .map(|row| {
+            if skip_row(row) {
+                return None;
+            }
+            let start = Point::new(start_lon.value(row), start_lat.value(row));
+            let end = Point::new(end_lon.value(row), end_lat.value(row));
+            Some((
+                network.get_or_add_node(start_vertex.value(row), start),
+                network.get_or_add_node(end_vertex.value(row), end),
+            ))
+        })
+        .collect();
 
     // Build edges in parallel; only graph insertion has to be sequential.
     let pending_edges: Vec<Option<PendingEdge>> = (0..batch.num_rows())
         .into_par_iter()
         .map(|row| {
-            if skip_row(row) {
-                return None;
-            }
+            let (from, to) = endpoints[row]?;
 
             let edge_id = stable_edge_id.value(row);
-            let sv_id = start_vertex.value(row);
-            let ev_id = end_vertex.value(row);
             let sv_lat = start_lat.value(row);
             let sv_lon = start_lon.value(row);
             let ev_lat = end_lat.value(row);
@@ -364,12 +361,12 @@ fn process_batch(
                 is_access_road: Frc::is_access_road(hw_tag),
             };
 
-            Some(PendingEdge { sv_id, ev_id, edge })
+            Some(PendingEdge { from, to, edge })
         })
         .collect();
 
     for pending in pending_edges.into_iter().flatten() {
-        let edge_idx = network.add_edge(pending.sv_id, pending.ev_id, pending.edge);
+        let edge_idx = network.add_edge(pending.from, pending.to, pending.edge);
 
         let edge_geom = &network.edge(edge_idx).unwrap().geometry;
         edge_envelopes.push(EdgeEnvelope::new(edge_idx, edge_geom));
@@ -734,7 +731,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut network = RoadNetwork::new();
+        let mut network = RoadNetworkBuilder::new();
         let mut edge_envelopes = Vec::new();
 
         let result = process_batch(&batch, &mut network, &mut edge_envelopes);
@@ -778,9 +775,9 @@ mod tests {
     }
 
     fn load(batch: &RecordBatch) -> RoadNetwork {
-        let mut network = RoadNetwork::new();
+        let mut network = RoadNetworkBuilder::new();
         process_batch(batch, &mut network, &mut Vec::new()).unwrap();
-        network
+        network.finish()
     }
 
     #[test]
@@ -802,7 +799,7 @@ mod tests {
 
         let network = load(&batch);
         let geom = |id| {
-            let idx = network.edge_id_to_index.as_ref().unwrap()[&id];
+            let idx = network.find_edge_by_id(id).unwrap();
             network.edge(idx).unwrap().geometry.0.len()
         };
         assert_eq!(geom(1), 2);
@@ -832,7 +829,7 @@ mod tests {
         let lanes: ArrayRef = Arc::new(Int32Array::from(vec![4, -1]));
         let network = load(&edge_batch(vec![Some(39.0), Some(39.1)], Some(lanes)));
         let fow = |id| {
-            let idx = network.edge_id_to_index.as_ref().unwrap()[&id];
+            let idx = network.find_edge_by_id(id).unwrap();
             network.edge(idx).unwrap().fow
         };
         assert_eq!(fow(1), Fow::MultipleCarriageway);

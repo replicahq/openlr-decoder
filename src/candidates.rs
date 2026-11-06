@@ -301,7 +301,7 @@ mod tests {
             .add_edge(11, 1, 2, 200.0, Frc::Frc4, Fow::SingleCarriageway)
             .add_edge(10, 1, 2, 200.0, Frc::Frc4, Fow::SingleCarriageway)
             .build();
-        let idx = |id| *network.edge_id_to_index.as_ref().unwrap().get(&id).unwrap();
+        let idx = |id| network.find_edge_by_id(id).unwrap();
 
         let candidates = find_candidates(
             Point::new(0.001, 0.00002),
@@ -333,7 +333,7 @@ mod tests {
             .add_edge(1, 1, 2, 200.0, Frc::Frc3, Fow::SlipRoad)
             .add_edge(2, 1, 2, 200.0, Frc::Frc3, Fow::SingleCarriageway)
             .build();
-        let idx = |id| *network.edge_id_to_index.as_ref().unwrap().get(&id).unwrap();
+        let idx = |id| network.find_edge_by_id(id).unwrap();
 
         let candidates = find_candidates(
             Point::new(0.001, 0.0),

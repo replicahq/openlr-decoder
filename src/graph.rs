@@ -45,75 +45,22 @@ impl Edge {
     }
 }
 
-/// Directed road graph. The id → index maps are only needed while loading;
-/// [`compact`](Self::compact) drops them.
+/// Directed road graph, built with [`RoadNetworkBuilder`].
 pub struct RoadNetwork {
     pub graph: DiGraph<Node, Edge>,
-    pub node_id_to_index: Option<HashMap<i64, NodeIndex>>,
-    pub edge_id_to_index: Option<HashMap<u64, EdgeIndex>>,
 }
 
 impl RoadNetwork {
-    pub fn new() -> Self {
-        RoadNetwork {
-            graph: DiGraph::new(),
-            node_id_to_index: Some(HashMap::new()),
-            edge_id_to_index: Some(HashMap::new()),
-        }
+    /// The edge whose [`Edge::id`] is `id`. A linear scan, for tests and
+    /// one-off lookups.
+    pub fn find_edge_by_id(&self, id: u64) -> Option<EdgeIndex> {
+        self.graph.edge_indices().find(|&e| self.graph[e].id == id)
     }
 
-    pub fn new_with_capacity(node_hint: usize, edge_hint: usize) -> Self {
-        RoadNetwork {
-            graph: DiGraph::with_capacity(node_hint, edge_hint),
-            node_id_to_index: Some(HashMap::with_capacity(node_hint)),
-            edge_id_to_index: Some(HashMap::with_capacity(edge_hint)),
-        }
-    }
-
-    /// Drop the id → index maps to free memory once loading is done. After
-    /// this, `add_node`, `get_or_add_node` and `add_edge` panic.
-    pub fn compact(&mut self) {
-        self.node_id_to_index = None;
-        self.edge_id_to_index = None;
-    }
-
-    pub fn add_node(&mut self, node: Node) -> NodeIndex {
-        let id = node.id;
-        let idx = self.graph.add_node(node);
-        self.node_id_to_index
-            .as_mut()
-            .expect("cannot add_node after compact()")
-            .insert(id, idx);
-        idx
-    }
-
-    pub fn get_or_add_node(&mut self, id: i64, coord: Point<f64>) -> NodeIndex {
-        let map = self
-            .node_id_to_index
-            .as_ref()
-            .expect("cannot get_or_add_node after compact()");
-        if let Some(&idx) = map.get(&id) {
-            return idx;
-        }
-        self.add_node(Node { id, coord })
-    }
-
-    /// Panics if either endpoint node hasn't been added yet.
-    pub fn add_edge(&mut self, from_node: i64, to_node: i64, edge: Edge) -> EdgeIndex {
-        let node_map = self
-            .node_id_to_index
-            .as_ref()
-            .expect("cannot add_edge after compact()");
-        let from_idx = *node_map.get(&from_node).expect("from_node must exist");
-        let to_idx = *node_map.get(&to_node).expect("to_node must exist");
-
-        let edge_id = edge.id;
-        let idx = self.graph.add_edge(from_idx, to_idx, edge);
-        self.edge_id_to_index
-            .as_mut()
-            .expect("cannot add_edge after compact()")
-            .insert(edge_id, idx);
-        idx
+    /// The node whose [`Node::id`] is `id`. A linear scan, for tests and
+    /// one-off lookups.
+    pub fn find_node_by_id(&self, id: i64) -> Option<NodeIndex> {
+        self.graph.node_indices().find(|&n| self.graph[n].id == id)
     }
 
     pub fn edge(&self, idx: EdgeIndex) -> Option<&Edge> {
@@ -228,9 +175,49 @@ impl RoadNetwork {
     }
 }
 
-impl Default for RoadNetwork {
-    fn default() -> Self {
-        Self::new()
+/// Builds a [`RoadNetwork`], deduplicating nodes by OSM id. The id map is
+/// dropped by [`finish`](Self::finish).
+#[derive(Default)]
+pub struct RoadNetworkBuilder {
+    graph: DiGraph<Node, Edge>,
+    node_index: HashMap<i64, NodeIndex>,
+}
+
+impl RoadNetworkBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_capacity(nodes: usize, edges: usize) -> Self {
+        RoadNetworkBuilder {
+            graph: DiGraph::with_capacity(nodes, edges),
+            node_index: HashMap::with_capacity(nodes),
+        }
+    }
+
+    /// The node with OSM id `id`, added at `coord` if it is new. An existing
+    /// node keeps its first coordinate.
+    pub fn get_or_add_node(&mut self, id: i64, coord: Point<f64>) -> NodeIndex {
+        *self
+            .node_index
+            .entry(id)
+            .or_insert_with(|| self.graph.add_node(Node { id, coord }))
+    }
+
+    pub fn node_index(&self, id: i64) -> Option<NodeIndex> {
+        self.node_index.get(&id).copied()
+    }
+
+    pub fn add_edge(&mut self, from: NodeIndex, to: NodeIndex, edge: Edge) -> EdgeIndex {
+        self.graph.add_edge(from, to, edge)
+    }
+
+    pub fn edge(&self, idx: EdgeIndex) -> Option<&Edge> {
+        self.graph.edge_weight(idx)
+    }
+
+    pub fn finish(self) -> RoadNetwork {
+        RoadNetwork { graph: self.graph }
     }
 }
 
@@ -260,7 +247,7 @@ mod tests {
             ("D", "B"),
         ];
 
-        let mut net = RoadNetwork::new();
+        let mut net = RoadNetworkBuilder::new();
         let mut idx = HashMap::new();
         let osm_id = |name| nodes.iter().position(|n| n.0 == name).unwrap() as i64;
         let coord = |name| nodes[osm_id(name) as usize].1;
@@ -270,9 +257,29 @@ mod tests {
         for (id, (a, b)) in edges.into_iter().enumerate() {
             let geom = LineString::from(vec![coord(a), coord(b)]);
             let edge = Edge::new(id as u64, geom, Frc::Frc4, Fow::SingleCarriageway);
-            net.add_edge(osm_id(a), osm_id(b), edge);
+            net.add_edge(idx[a], idx[b], edge);
         }
-        (net, idx)
+        (net.finish(), idx)
+    }
+
+    #[test]
+    fn test_builder_dedupes_nodes_and_finds_ids() {
+        let mut b = RoadNetworkBuilder::new();
+        let n1 = b.get_or_add_node(7, Point::new(1.0, 2.0));
+        assert_eq!(b.get_or_add_node(7, Point::new(9.0, 9.0)), n1);
+        let n2 = b.get_or_add_node(8, Point::new(1.0, 2.1));
+        let geom = LineString::from(vec![(1.0, 2.0), (1.0, 2.1)]);
+        let e = b.add_edge(
+            n1,
+            n2,
+            Edge::new(42, geom, Frc::Frc4, Fow::SingleCarriageway),
+        );
+        let net = b.finish();
+        assert_eq!(net.node_count(), 2);
+        assert_eq!(net.node(n1).unwrap().coord, Point::new(1.0, 2.0));
+        assert_eq!(net.find_node_by_id(8), Some(n2));
+        assert_eq!(net.find_edge_by_id(42), Some(e));
+        assert_eq!(net.find_edge_by_id(43), None);
     }
 
     #[test]
