@@ -9,7 +9,22 @@ permissions:
   contents: read
 
 jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag must match the Cargo.toml version
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "openlr_decoder") | .version')
+          if [ "${GITHUB_REF_NAME}" != "v${version}" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${version}. Bump [package] version in Cargo.toml (pyproject.toml reads it from there)."
+            exit 1
+          fi
+
   linux:
+    needs: check-version
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -36,6 +51,7 @@ jobs:
           path: dist
 
   macos:
+    needs: check-version
     runs-on: macos-14
     strategy:
       matrix:
@@ -59,6 +75,7 @@ jobs:
           path: dist
 
   sdist:
+    needs: check-version
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
