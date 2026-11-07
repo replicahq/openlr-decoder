@@ -29,6 +29,12 @@ not published by this workflow.
    `uv pip install`, and check that `import openlr_decoder` works and that
    `importlib.metadata.version("openlr-decoder")` is `X.Y.Z`.
 4. Open a PR titled `Release X.Y.Z` and squash-merge it once CI passes.
+   Then do a build-only dry run of the release workflow on `main`:
+   `gh workflow run Release --ref main`, find it with
+   `gh run list -w Release -e workflow_dispatch -L 1`, and
+   `gh run watch --exit-status <id>`. CI doesn't build the macOS wheels, so this
+   is the only check that the release runners still work (the `macos-14` image
+   was retired between 0.2.7 and 0.3.0). Don't tag until it passes.
 5. After confirming with the user, tag the merge commit on `main` and push the
    tag: `git tag vX.Y.Z && git push origin vX.Y.Z`.
 6. Find this tag's run with
@@ -38,3 +44,22 @@ not published by this workflow.
    step, so an exit status of 0 means the version is on PyPI.
 7. Only if step 6 exited 0, create the GitHub release:
    `gh release create vX.Y.Z --generate-notes`.
+
+## If the release run fails
+
+Check PyPI first: `curl -s https://pypi.org/pypi/openlr-decoder/X.Y.Z/json`.
+If the version is there, it can't be uploaded again, so fix forward with a
+patch release.
+
+If nothing was published, fix the workflow on `main`. Re-running the failed
+run won't pick up the fix, because it uses the workflow file at the tagged
+commit. The tag has to move to the fix commit, and that is a force-push, which
+Claude's permission check always blocks. Give the user the command to run
+themselves:
+
+```
+! git tag -f vX.Y.Z <fix-commit> && git push -f origin vX.Y.Z
+```
+
+The alternative is to bump to the next patch version and tag that. This leaves
+the old tag on a commit that was never published.
