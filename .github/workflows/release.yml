@@ -52,7 +52,7 @@ jobs:
 
   macos:
     needs: check-version
-    runs-on: macos-14
+    runs-on: macos-15
     strategy:
       matrix:
         python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
