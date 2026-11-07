@@ -29,14 +29,17 @@ not published by this workflow.
    `uv pip install`, and check that `import openlr_decoder` works and that
    `importlib.metadata.version("openlr-decoder")` is `X.Y.Z`.
 4. Open a PR titled `Release X.Y.Z` and squash-merge it once CI passes.
-   Then do a build-only dry run of the release workflow on `main`:
-   `gh workflow run Release --ref main`, find it with
-   `gh run list -w Release -e workflow_dispatch -L 1`, and
-   `gh run watch --exit-status <id>`. CI doesn't build the macOS wheels, so this
-   is the only check that the release runners still work (the `macos-14` image
-   was retired between 0.2.7 and 0.3.0). Don't tag until it passes.
-5. After confirming with the user, tag the merge commit on `main` and push the
-   tag: `git tag vX.Y.Z && git push origin vX.Y.Z`.
+   Then do a build-only dry run of the release workflow on `main`. Start it
+   with `gh workflow run Release --ref main`. Find it with
+   `gh run list -w Release -e workflow_dispatch --commit $(git rev-parse origin/main) -L 1 --json databaseId -q '.[0].databaseId'`,
+   retrying until it appears, and watch it with
+   `gh run watch --exit-status <id>`. CI doesn't build the macOS wheels, so
+   this is the only check that the release runners still work. The `macos-14`
+   image was retired between 0.2.7 and 0.3.0. If the dry run fails, fix the
+   workflow in another PR, merge it, and dry-run the new `main`. Don't tag
+   until a dry run passes.
+5. After confirming with the user, tag the commit whose dry run passed and
+   push the tag: `git tag vX.Y.Z <commit> && git push origin vX.Y.Z`.
 6. Find this tag's run with
    `gh run list -w Release --commit $(git rev-parse vX.Y.Z) -L 1 --json databaseId -q '.[0].databaseId'`,
    retrying until it appears, since GitHub takes a few seconds to register it.
@@ -54,12 +57,15 @@ patch release.
 If nothing was published, fix the workflow on `main`. Re-running the failed
 run won't pick up the fix, because it uses the workflow file at the tagged
 commit. The tag has to move to the fix commit, and that is a force-push, which
-Claude's permission check always blocks. Give the user the command to run
+Claude's permission check always blocks. Give the user this command to run
 themselves:
 
 ```
-! git tag -f vX.Y.Z <fix-commit> && git push -f origin vX.Y.Z
+git tag -f vX.Y.Z <fix-commit> && git push -f origin vX.Y.Z
 ```
+
+Tell them to put `! ` in front only if they type it into the Claude Code
+prompt. In a normal shell, `!` negates the result, so the push never runs.
 
 The alternative is to bump to the next patch version and tag that. This leaves
 the old tag on a commit that was never published.
