@@ -29,6 +29,15 @@ Homepage = "https://github.com/replicahq/openlr-decoder"
 Repository = "https://github.com/replicahq/openlr-decoder"
 Documentation = "https://replicahq.github.io/openlr-decoder"
 
+[tool.uv]
+# The version comes from Cargo.toml, so rebuild when it or the Rust sources change.
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "Cargo.toml" },
+    { file = "crates/*/Cargo.toml" },
+    { file = "**/*.rs" },
+]
+
 [tool.maturin]
 features = ["python"]
 python-source = "python"

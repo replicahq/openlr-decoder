@@ -31,7 +31,10 @@ not published by this workflow.
 4. Open a PR titled `Release X.Y.Z` and squash-merge it once CI passes.
 5. After confirming with the user, tag the merge commit on `main` and push the
    tag: `git tag vX.Y.Z && git push origin vX.Y.Z`.
-6. Watch the run with `gh run watch $(gh run list -w Release -L 1 --json databaseId -q '.[0].databaseId')`.
-   There is no approval step, so a passing run is on PyPI.
-7. After it publishes, create the GitHub release:
+6. Find this tag's run with
+   `gh run list -w Release --commit $(git rev-parse vX.Y.Z) -L 1 --json databaseId -q '.[0].databaseId'`,
+   retrying until it appears, since GitHub takes a few seconds to register it.
+   Then watch it with `gh run watch --exit-status <id>`. There is no approval
+   step, so an exit status of 0 means the version is on PyPI.
+7. Only if step 6 exited 0, create the GitHub release:
    `gh release create vX.Y.Z --generate-notes`.
