@@ -29,7 +29,8 @@ pub struct Ping {
     pub point: Point<f64>,
     /// Seconds from any fixed origin. Must not decrease along a trace.
     pub time_s: f64,
-    /// Treated as missing if not finite.
+    /// Treated as missing if negative (some devices report -1 for unknown) or
+    /// not finite.
     pub speed_mps: Option<f64>,
     /// Course over ground, degrees clockwise from north. Treated as missing if
     /// not finite.
@@ -38,7 +39,7 @@ pub struct Ping {
 
 impl Ping {
     fn speed(&self) -> Option<f64> {
-        self.speed_mps.filter(|v| v.is_finite())
+        self.speed_mps.filter(|v| v.is_finite() && *v >= 0.0)
     }
 
     fn heading(&self) -> Option<f64> {

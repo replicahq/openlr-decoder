@@ -192,7 +192,7 @@ fn json_flag(
     kind: &str,
     trace: &Trace,
     w: &[MatchedPing],
-    route_m: f64,
+    route_m: Option<f64>,
     edges: &[EdgeIndex],
 ) -> String {
     let (from, to) = (w[0].index, w[1].index);
@@ -220,9 +220,10 @@ fn json_flag(
         .collect();
     let ids: Vec<u64> = edges.iter().map(|&e| net.edge(e).unwrap().id).collect();
     format!(
-        "{{\"kind\":\"{kind}\",\"trace_id\":\"{}\",\"from\":{from},\"to\":{to},\"route_m\":{route_m:.0},\
+        "{{\"kind\":\"{kind}\",\"trace_id\":\"{}\",\"from\":{from},\"to\":{to},\"route_m\":{},\
          \"edges\":{ids:?},\"matched\":[{}],\"pings\":[{}]}}",
         trace.id,
+        route_m.map_or("null".into(), |m| format!("{m:.0}")),
         matched.join(","),
         pings.join(",")
     )
@@ -243,7 +244,7 @@ fn evaluate(
         for pair in res.segments.windows(2) {
             let w = [*pair[0].pings.last().unwrap(), pair[1].pings[0]];
             ev.flagged
-                .push(json_flag(net, "break", trace, &w, f64::NAN, &[]));
+                .push(json_flag(net, "break", trace, &w, None, &[]));
         }
     }
     for seg in &res.segments {
@@ -265,7 +266,7 @@ fn evaluate(
             let mut flagged = |kind: &str| {
                 if flag {
                     ev.flagged
-                        .push(json_flag(net, kind, trace, w, route_m, edges));
+                        .push(json_flag(net, kind, trace, w, Some(route_m), edges));
                 }
             };
             if let Some(k) = (ka..kb).find(|&k| net.is_reverse_of(seg.edges[k], seg.edges[k + 1])) {

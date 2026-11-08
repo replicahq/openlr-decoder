@@ -353,4 +353,10 @@ fn test_slow_pings_between_roads_do_not_route_around() {
     }
     let r = m.match_trace(&pings).unwrap();
     assert_eq!(r.segments.len(), 2);
+
+    // A negative speed means unknown, as without speeds.
+    for p in &mut pings {
+        p.speed_mps = Some(-1.0);
+    }
+    assert_eq!(m.match_trace(&pings).unwrap().segments.len(), 1);
 }
