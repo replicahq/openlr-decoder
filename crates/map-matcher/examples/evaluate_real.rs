@@ -385,7 +385,7 @@ fn main() -> anyhow::Result<()> {
         let Some(t) = traces.iter().find(|t| &t.id == id) else {
             anyhow::bail!("no trace {id}");
         };
-        let m = Matcher::new(&net, &spatial, MatchConfig::with_sigma(5.0));
+        let m = Matcher::new(&net, &spatial, MatchConfig::default());
         print_trace(&net, t, &m.match_trace(&t.pings)?);
         return Ok(());
     }
@@ -403,25 +403,33 @@ fn main() -> anyhow::Result<()> {
         100.0 * stopped as f64 / n as f64
     );
 
+    let default = MatchConfig::default;
     let configs = [
-        ("sigma=5", MatchConfig::with_sigma(5.0)),
+        ("default (sigma=10)", default()),
         (
-            "sigma=5 uturn_penalty=0",
+            "uturn_penalty=0",
             MatchConfig {
                 uturn_penalty: 0.0,
-                ..MatchConfig::with_sigma(5.0)
+                ..default()
             },
         ),
         (
-            "sigma=5 no heading/speed",
+            "no heading or speed",
             MatchConfig {
                 use_heading: false,
                 use_speed: false,
-                ..MatchConfig::with_sigma(5.0)
+                ..default()
             },
         ),
-        ("sigma=10", MatchConfig::with_sigma(10.0)),
+        ("sigma=5", MatchConfig::with_sigma(5.0)),
         ("sigma=20", MatchConfig::with_sigma(20.0)),
+        (
+            "search_radius_m=80",
+            MatchConfig {
+                search_radius_m: 80.0,
+                ..default()
+            },
+        ),
     ];
     println!(
         "{:<26} {:>6} {:>9} {:>6} {:>6} {:>8} {:>11} {:>13} {:>7} {:>11}",

@@ -100,7 +100,9 @@ impl PyRoadNetwork {
 /// Matcher settings. Distances are meters, speeds m/s, headings degrees.
 ///
 /// Args:
-///     sigma_m: Standard deviation of GPS position error.
+///     sigma_m: Standard deviation of GPS position error. Set it above the
+///         typical error, since real errors have a heavy tail: 10 m suits
+///         phone or telematics pings with a median error of about 3 m.
 ///     search_radius_m: Edges further from a ping are not candidates.
 ///         Default 4 × sigma_m, at least 50.
 ///     max_candidates: Candidates kept per ping.
