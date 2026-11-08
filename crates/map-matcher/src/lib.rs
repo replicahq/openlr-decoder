@@ -48,9 +48,15 @@ impl Ping {
 
 #[derive(Debug, Clone)]
 pub struct MatchConfig {
-    /// Standard deviation of GPS position error.
+    /// Standard deviation of GPS position error. Real errors have a heavy tail,
+    /// so set this above the typical error: on Arity pings (median 2.9 m, p95
+    /// 16 m) 10 m gave half the detours at stops of 5 m, and on synthetic
+    /// traces with a 3–5 m error it matched as many traces entirely correctly
+    /// as any other setting.
     pub sigma_m: f64,
-    /// Edges further than this from a ping are not candidates.
+    /// Edges further than this from a ping are not candidates. On Arity pings,
+    /// three quarters of those 50–80 m from any road were parked, so the 50 m
+    /// minimum leaves them unmatched rather than placing them on a road.
     pub search_radius_m: f64,
     /// Candidates kept per ping, best emission first.
     pub max_candidates: usize,
