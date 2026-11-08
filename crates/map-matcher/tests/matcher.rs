@@ -320,3 +320,43 @@ fn test_match_trace_rejects_invalid_config() {
         .unwrap_err();
     assert!(matches!(err, MatchError::InvalidConfig(ref r) if r.contains("sigma_m")));
 }
+
+#[test]
+fn test_slow_pings_between_roads_do_not_route_around() {
+    // Two-way roads at y = 0 and y = 90, joined only at x = 200: a parking lot
+    // between them is 450 m round by road.
+    let lat = |y: f64| LAT + y / 111_000.0;
+    let (net, sp) = TestNetworkBuilder::new()
+        .add_node(0, lat(0.0), lon(0.0))
+        .add_node(1, lat(0.0), lon(200.0))
+        .add_node(2, lat(90.0), lon(200.0))
+        .add_node(3, lat(90.0), lon(0.0))
+        .add_edge_auto_length(1, 0, 1, Frc::Frc4, Fow::SingleCarriageway)
+        .add_edge_auto_length(11, 1, 0, Frc::Frc4, Fow::SingleCarriageway)
+        .add_edge_auto_length(2, 1, 2, Frc::Frc4, Fow::SingleCarriageway)
+        .add_edge_auto_length(12, 2, 1, Frc::Frc4, Fow::SingleCarriageway)
+        .add_edge_auto_length(3, 2, 3, Frc::Frc4, Fow::SingleCarriageway)
+        .add_edge_auto_length(13, 3, 2, Frc::Frc4, Fow::SingleCarriageway)
+        .build();
+    let m = Matcher::new(&net, &sp, MatchConfig::default());
+
+    // Creeping 20 m north across the lot, each ping within the 50 m search
+    // radius of one road only.
+    let mut pings = vec![ping(20.0, 35.0, 0.0, None), ping(20.0, 55.0, 14.0, None)];
+    let r = m.match_trace(&pings).unwrap();
+    assert_eq!(r.segments.len(), 1, "without speeds the loop is drivable");
+    assert_eq!(ids(&net, &r.segments[0].edges), vec![1, 2, 3]);
+
+    // At 1.4 m/s the 450 m loop would take more than five minutes.
+    for p in &mut pings {
+        p.speed_mps = Some(1.4);
+    }
+    let r = m.match_trace(&pings).unwrap();
+    assert_eq!(r.segments.len(), 2);
+
+    // A negative speed means unknown, as without speeds.
+    for p in &mut pings {
+        p.speed_mps = Some(-1.0);
+    }
+    assert_eq!(m.match_trace(&pings).unwrap().segments.len(), 1);
+}

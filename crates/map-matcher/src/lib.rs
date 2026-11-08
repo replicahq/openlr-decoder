@@ -29,7 +29,8 @@ pub struct Ping {
     pub point: Point<f64>,
     /// Seconds from any fixed origin. Must not decrease along a trace.
     pub time_s: f64,
-    /// Treated as missing if not finite.
+    /// Treated as missing if negative (some devices report -1 for unknown) or
+    /// not finite.
     pub speed_mps: Option<f64>,
     /// Course over ground, degrees clockwise from north. Treated as missing if
     /// not finite.
@@ -38,7 +39,7 @@ pub struct Ping {
 
 impl Ping {
     fn speed(&self) -> Option<f64> {
-        self.speed_mps.filter(|v| v.is_finite())
+        self.speed_mps.filter(|v| v.is_finite() && *v >= 0.0)
     }
 
     fn heading(&self) -> Option<f64> {
@@ -74,7 +75,9 @@ pub struct MatchConfig {
     /// average speed times the time between them, when both pings have a speed.
     pub use_speed: bool,
     /// Standard deviation of that speed, so the route distance tolerance grows
-    /// with the time between pings.
+    /// with the time between pings. Routes more than four of these standard
+    /// deviations longer than the expected distance are not searched, unless
+    /// they are within the straight-line distance + 200 m.
     pub speed_sigma_mps: f64,
     /// The route search between two pings stops at `max_speed_mps` × the time
     /// between them (or the straight-line distance + 200 m, if more). The cap

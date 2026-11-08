@@ -254,7 +254,7 @@ impl PyMatcher {
     ///         - time: a timestamp, or seconds as a number. Must not decrease
     ///           within a trace.
     ///         - lat, lon: degrees.
-    ///         - speed (optional): m/s. Null or NaN means unknown.
+    ///         - speed (optional): m/s. Null, NaN or negative means unknown.
     ///         - heading (optional): degrees clockwise from north. Null or NaN
     ///           means unknown.
     ///
