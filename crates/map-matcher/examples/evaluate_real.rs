@@ -24,7 +24,7 @@
 //!   the u-turn is probably real; "kept" means it didn't, so the u-turn is
 //!   probably a matching artifact; "unknown" means no moving ping on one side.
 //!
-//! With FLAGGED.jsonl, writes every detour and u-turn of the first config as
+//! With FLAGGED.jsonl, writes every break, detour and u-turn of the first config as
 //! one JSON object per line, for inspection on a map. With `--trace`, prints
 //! one trace's match ping by ping instead.
 
@@ -239,6 +239,13 @@ fn evaluate(
     ev.pings += trace.pings.len();
     ev.unmatched += res.unmatched.len();
     ev.breaks += res.segments.len().saturating_sub(1);
+    if flag {
+        for pair in res.segments.windows(2) {
+            let w = [*pair[0].pings.last().unwrap(), pair[1].pings[0]];
+            ev.flagged
+                .push(json_flag(net, "break", trace, &w, f64::NAN, &[]));
+        }
+    }
     for seg in &res.segments {
         for p in &seg.pings {
             ev.residuals.push(p.distance_m);

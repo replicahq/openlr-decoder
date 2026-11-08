@@ -10,6 +10,14 @@ use crate::{MatchResult, MatchedPing, MatchedSegment, Matcher, Ping};
 /// connected in the time between them.
 const JUMP_SLACK_M: f64 = 200.0;
 
+/// Routes longer than the speed-implied distance plus this many speed
+/// standard deviations are not searched, so the chain breaks instead. On real
+/// 15 s pings this cut detours while moving from 186 to 141, mostly slow
+/// driving in parking lots routed hundreds of meters around by road. On
+/// synthetic traces accuracy was unchanged and 15 s pings matched about a
+/// quarter faster.
+const MAX_SPEED_Z: f64 = 4.0;
+
 /// The candidates of one ping that had any.
 struct Layer {
     ping: usize,
@@ -45,9 +53,6 @@ pub(crate) fn run(m: &Matcher, pings: &[Ping]) -> MatchResult {
             // Allow for GPS error at both ends: a pair this far apart can't be
             // driven in the time, so it breaks the chain without searching.
             let reachable = straight <= c.max_speed_mps * dt + JUMP_SLACK_M;
-            let max_route = (c.max_speed_mps * dt)
-                .min(straight + c.max_detour_m)
-                .max(straight + JUMP_SLACK_M);
             let speed = match (p0.speed(), ping.speed()) {
                 (Some(v0), Some(v1)) if c.use_speed && dt > 0.0 => {
                     // Floored at the GPS error, so closely spaced pings don't
@@ -59,6 +64,11 @@ pub(crate) fn run(m: &Matcher, pings: &[Ping]) -> MatchResult {
                 }
                 _ => None,
             };
+            let speed_cap = speed.map_or(f64::INFINITY, |(e, s)| e + MAX_SPEED_Z * s);
+            let max_route = (c.max_speed_mps * dt)
+                .min(straight + c.max_detour_m)
+                .min(speed_cap)
+                .max(straight + JUMP_SLACK_M);
 
             for (i, a) in prev.cands.iter().enumerate() {
                 if !reachable || prev.score[i] == f64::NEG_INFINITY {

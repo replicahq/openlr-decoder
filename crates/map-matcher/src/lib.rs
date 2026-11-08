@@ -74,7 +74,9 @@ pub struct MatchConfig {
     /// average speed times the time between them, when both pings have a speed.
     pub use_speed: bool,
     /// Standard deviation of that speed, so the route distance tolerance grows
-    /// with the time between pings.
+    /// with the time between pings. Routes more than four of these standard
+    /// deviations longer than the expected distance are not searched, unless
+    /// they are within the straight-line distance + 200 m.
     pub speed_sigma_mps: f64,
     /// The route search between two pings stops at `max_speed_mps` × the time
     /// between them (or the straight-line distance + 200 m, if more). The cap
