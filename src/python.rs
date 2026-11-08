@@ -211,6 +211,8 @@ impl PyDecoderConfig {
         snap_to_valid_nodes = true,
         max_snap_extension_m = 25.0
     ))]
+    // Python keyword arguments, one per config field.
+    #[allow(clippy::too_many_arguments)]
     fn new(
         search_radius_m: f64,
         max_bearing_diff: f64,
