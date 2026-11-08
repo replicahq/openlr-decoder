@@ -135,6 +135,7 @@ def test_errors(network):
         ({"beta_m": -1}, "beta_m must be a positive number"),
         ({"max_detour_m": float("nan")}, "max_detour_m must be a positive number"),
         ({"backward_slack_m": -5}, "backward_slack_m must be a non-negative number"),
+        ({"uturn_penalty": -1}, "uturn_penalty must be a non-negative number"),
         ({"max_candidates": 0}, "max_candidates must be at least 1"),
         ({"max_frc": 8}, "max_frc must be 0 to 7"),
     ],
@@ -161,6 +162,7 @@ def test_config_repr_and_defaults():
     assert "search_radius_m=80" in r
     assert "backward_slack_m=60" in r
     assert "max_detour_m=2000" in r
+    assert "uturn_penalty=2" in r
     assert "use_heading=True" in r
 
 
