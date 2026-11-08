@@ -117,6 +117,8 @@ impl PyRoadNetwork {
 ///         which bounds the search after a long gap in a trace.
 ///     backward_slack_m: How far a ping may project behind the previous one
 ///         on the same edge and still count as stopped. Default 3 × sigma_m.
+///     uturn_penalty: Log-score cost of a route that turns straight back onto
+///         the road it came along.
 ///     max_frc: Least important road class matched, 0 (motorway) to 7.
 #[pyclass(name = "MatchConfig", frozen)]
 pub struct PyMatchConfig {
@@ -140,6 +142,7 @@ impl PyMatchConfig {
         max_speed_mps = 40.0,
         max_detour_m = 2000.0,
         backward_slack_m = None,
+        uturn_penalty = 2.0,
         max_frc = 4,
     ))]
     #[allow(clippy::too_many_arguments)]
@@ -156,6 +159,7 @@ impl PyMatchConfig {
         max_speed_mps: f64,
         max_detour_m: f64,
         backward_slack_m: Option<f64>,
+        uturn_penalty: f64,
         max_frc: u8,
     ) -> PyResult<Self> {
         if max_frc > 7 {
@@ -174,6 +178,7 @@ impl PyMatchConfig {
             max_speed_mps,
             max_detour_m,
             backward_slack_m: backward_slack_m.unwrap_or(base.backward_slack_m),
+            uturn_penalty,
             max_frc: Frc::from_u8(max_frc),
             ..base
         };
@@ -187,7 +192,7 @@ impl PyMatchConfig {
             "MatchConfig(sigma_m={}, search_radius_m={}, max_candidates={}, beta_m={}, \
              use_heading={}, heading_kappa={}, heading_min_speed_mps={}, use_speed={}, \
              speed_sigma_mps={}, max_speed_mps={}, max_detour_m={}, backward_slack_m={}, \
-             max_frc={})",
+             uturn_penalty={}, max_frc={})",
             c.sigma_m,
             c.search_radius_m,
             c.max_candidates,
@@ -200,6 +205,7 @@ impl PyMatchConfig {
             c.max_speed_mps,
             c.max_detour_m,
             c.backward_slack_m,
+            c.uturn_penalty,
             c.max_frc as u8,
         )
     }

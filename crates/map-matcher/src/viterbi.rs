@@ -68,6 +68,9 @@ pub(crate) fn run(m: &Matcher, pings: &[Ping]) -> MatchResult {
                     let Some(route) = route else { continue };
                     let len = route.len_m;
                     let mut transition = -(len - straight).abs() / c.beta_m;
+                    if route.uturn {
+                        transition -= c.uturn_penalty;
+                    }
                     if let Some((expected, sigma)) = speed {
                         transition -= 0.5 * ((len - expected) / sigma).powi(2);
                     }

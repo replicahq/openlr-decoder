@@ -144,6 +144,48 @@ fn test_jitter_while_stopped_stays_on_edge() {
 }
 
 #[test]
+fn test_stop_near_side_road_stays_on_main_road() {
+    // The two-way road plus a two-way 12 m stub north from the 100 m node.
+    let mut b = TestNetworkBuilder::new();
+    for i in 0..4 {
+        b = b.add_node(i, LAT, lon(100.0 * i as f64));
+    }
+    b = b.add_node(10, LAT + 12.0 / 111_000.0, lon(100.0));
+    for i in 0..3 {
+        let (a, z) = (i as i64, i as i64 + 1);
+        b = b
+            .add_edge_auto_length(1 + i, a, z, Frc::Frc3, Fow::SingleCarriageway)
+            .add_edge_auto_length(11 + i, z, a, Frc::Frc3, Fow::SingleCarriageway);
+    }
+    let (net, sp) = b
+        .add_edge_auto_length(21, 1, 10, Frc::Frc4, Fow::SingleCarriageway)
+        .add_edge_auto_length(22, 10, 1, Frc::Frc4, Fow::SingleCarriageway)
+        .build();
+
+    // Driving east and stopped at the junction, where the fix is pulled north
+    // onto the stub, then driving on. A stopped ping has no usable heading.
+    let pings = [
+        ping(20.0, 0.0, 0.0, Some(90.0)),
+        ping(60.0, 0.0, 4.0, Some(90.0)),
+        ping(100.0, 8.0, 14.0, None),
+        ping(150.0, 0.0, 20.0, Some(90.0)),
+        ping(250.0, 0.0, 30.0, Some(90.0)),
+    ];
+    let edges = |uturn_penalty: f64| {
+        let config = MatchConfig {
+            uturn_penalty,
+            ..MatchConfig::with_sigma(5.0)
+        };
+        let r = Matcher::new(&net, &sp, config).match_trace(&pings).unwrap();
+        assert_eq!(r.segments.len(), 1);
+        ids(&net, &r.segments[0].edges)
+    };
+    assert_eq!(edges(0.0), vec![1, 21, 22, 2, 3]);
+    assert_eq!(MatchConfig::with_sigma(5.0).uturn_penalty, 2.0);
+    assert_eq!(edges(2.0), vec![1, 2, 3]);
+}
+
+#[test]
 fn test_rejects_decreasing_time() {
     let (net, sp) = two_way_road();
     let m = Matcher::new(&net, &sp, MatchConfig::default());
