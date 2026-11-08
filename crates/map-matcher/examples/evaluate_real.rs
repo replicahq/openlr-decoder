@@ -129,23 +129,27 @@ struct Eval {
 }
 
 /// For each matched ping of the segment, the index of its edge in the path
-/// and its distance along the path.
-fn path_positions(net: &RoadNetwork, seg: &MatchedSegment) -> Vec<(usize, f64)> {
+/// and its distance along the path. A ping more than `slack_m` behind the
+/// previous one on the same edge was reached by looping back onto that edge,
+/// as the matcher's routes do.
+fn path_positions(net: &RoadNetwork, seg: &MatchedSegment, slack_m: f64) -> Vec<(usize, f64)> {
     let mut out = Vec::with_capacity(seg.pings.len());
     let (mut k, mut before) = (0, 0.0);
+    let mut prev: Option<&MatchedPing> = None;
     for p in &seg.pings {
-        // Scan forward from the previous ping: the path may visit an edge twice.
-        while k < seg.edges.len() && seg.edges[k] != p.edge {
+        let looped = prev.is_some_and(|q| q.edge == p.edge && p.offset_m < q.offset_m - slack_m);
+        if looped && k + 1 < seg.edges.len() {
+            before += net.edge(seg.edges[k]).unwrap().length_m;
+            k += 1;
+        }
+        while k + 1 < seg.edges.len() && seg.edges[k] != p.edge {
             before += net.edge(seg.edges[k]).unwrap().length_m;
             k += 1;
         }
         out.push((k, before + p.offset_m));
+        prev = Some(p);
     }
     out
-}
-
-fn is_uturn(net: &RoadNetwork, a: EdgeIndex, b: EdgeIndex) -> bool {
-    net.edge_source(a) == net.edge_target(b) && net.edge_target(a) == net.edge_source(b)
 }
 
 /// Classifies a u-turn between pings `i` and `j` by where it happens (a dead
@@ -224,7 +228,14 @@ fn json_flag(
     )
 }
 
-fn evaluate(net: &RoadNetwork, trace: &Trace, res: &MatchResult, ev: &mut Eval, flag: bool) {
+fn evaluate(
+    net: &RoadNetwork,
+    trace: &Trace,
+    res: &MatchResult,
+    slack_m: f64,
+    ev: &mut Eval,
+    flag: bool,
+) {
     ev.pings += trace.pings.len();
     ev.unmatched += res.unmatched.len();
     ev.breaks += res.segments.len().saturating_sub(1);
@@ -238,7 +249,7 @@ fn evaluate(net: &RoadNetwork, trace: &Trace, res: &MatchResult, ev: &mut Eval, 
                 ev.heading_ok += (bearing_difference(b, h) <= HEADING_OK_DEG) as usize;
             }
         }
-        let pos = path_positions(net, seg);
+        let pos = path_positions(net, seg, slack_m);
         for (w, d) in seg.pings.windows(2).zip(pos.windows(2)) {
             let (i, j) = (w[0].index, w[1].index);
             let ((ka, da), (kb, db)) = (d[0], d[1]);
@@ -250,7 +261,7 @@ fn evaluate(net: &RoadNetwork, trace: &Trace, res: &MatchResult, ev: &mut Eval, 
                         .push(json_flag(net, kind, trace, w, route_m, edges));
                 }
             };
-            if let Some(k) = (ka..kb).find(|&k| is_uturn(net, seg.edges[k], seg.edges[k + 1])) {
+            if let Some(k) = (ka..kb).find(|&k| net.is_reverse_of(seg.edges[k], seg.edges[k + 1])) {
                 let class = uturn_class(net, trace, i, j, seg.edges[k]);
                 flagged(&format!("u-turn {class}"));
                 *ev.uturns.entry(class).or_default() += 1;
@@ -326,7 +337,7 @@ fn run(net: &RoadNetwork, m: &Matcher, traces: &[Trace], flag: bool) -> (Eval, f
     let secs = t0.elapsed().as_secs_f64();
     let mut ev = Eval::default();
     for (t, r) in traces.iter().zip(&results) {
-        evaluate(net, t, r, &mut ev, flag);
+        evaluate(net, t, r, m.config().backward_slack_m, &mut ev, flag);
     }
     (ev, secs)
 }

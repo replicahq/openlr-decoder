@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use geo::Haversine;
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use road_network::spatial::{bearing_along, bearing_difference, project_onto_line};
-use road_network::{BearingDirection, Edge, RoadNetwork, ShortestPaths};
+use road_network::{BearingDirection, Edge, ShortestPaths};
 
 use crate::{Matcher, Ping};
 
@@ -83,7 +83,8 @@ pub(crate) struct Route {
     /// the vehicle moved forward along it, or jittered back within the
     /// backward slack.
     pub same_edge: bool,
-    /// The route turns from an edge straight onto its reverse.
+    /// The route turns from an edge straight onto its reverse
+    /// ([`RoadNetwork::is_reverse_of`](road_network::RoadNetwork::is_reverse_of)).
     pub uturn: bool,
 }
 
@@ -151,8 +152,8 @@ pub(crate) fn routes(
             let first = edges.first().copied();
             let last = edges.last().copied();
             for &j in js {
-                let uturn = is_uturn(net, from.edge, first.unwrap_or(to[j].edge))
-                    || is_uturn(net, last.unwrap_or(from.edge), to[j].edge);
+                let uturn = net.is_reverse_of(from.edge, first.unwrap_or(to[j].edge))
+                    || net.is_reverse_of(last.unwrap_or(from.edge), to[j].edge);
                 out[j] = Some(Route {
                     len_m: cost + to[j].offset_m,
                     between: edges.clone(),
@@ -163,11 +164,6 @@ pub(crate) fn routes(
         }
     });
     out
-}
-
-/// `b` runs between the same two nodes as `a`, the other way.
-fn is_uturn(net: &RoadNetwork, a: EdgeIndex, b: EdgeIndex) -> bool {
-    net.edge_source(a) == net.edge_target(b) && net.edge_target(a) == net.edge_source(b)
 }
 
 /// Great-circle distance between two pings.

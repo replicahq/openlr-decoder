@@ -83,6 +83,35 @@ impl RoadNetwork {
         self.graph.edge_endpoints(edge_idx).map(|(s, _)| s)
     }
 
+    /// Whether `b` is the same road as `a` driven the other way: it joins the
+    /// same two nodes in the opposite direction, has about the same length,
+    /// and each edge's middle shape point lies within 5 m of the other. The
+    /// shape check tells a two-way road's twin edges apart from two different
+    /// roads between one pair of nodes, such as the halves of a loop.
+    pub fn is_reverse_of(&self, a: EdgeIndex, b: EdgeIndex) -> bool {
+        const MAX_OFFSET_M: f64 = 5.0;
+        if a == b
+            || self.edge_source(a) != self.edge_target(b)
+            || self.edge_target(a) != self.edge_source(b)
+        {
+            return false;
+        }
+        let (Some(ea), Some(eb)) = (self.edge(a), self.edge(b)) else {
+            return false;
+        };
+        if (ea.length_m - eb.length_m).abs() > MAX_OFFSET_M.max(0.05 * ea.length_m) {
+            return false;
+        }
+        let middle_on = |from: &Edge, onto: &Edge| {
+            let coords = &from.geometry.0;
+            coords.get(coords.len() / 2).is_some_and(|&c| {
+                crate::spatial::project_onto_line(Point::from(c), &onto.geometry)
+                    .is_some_and(|p| p.distance_m <= MAX_OFFSET_M)
+            })
+        };
+        middle_on(ea, eb) && middle_on(eb, ea)
+    }
+
     /// Whether a node is valid under OpenLR Rule 4 (whitepaper §6).
     ///
     /// A node is invalid when a route search passes through it without a
@@ -322,5 +351,36 @@ mod tests {
         // Leaving J via J→C means we arrived via B→J
         assert_eq!(net.forced_predecessor(n["J"], jc), Some(bj));
         assert_eq!(net.forced_predecessor(n["B"], bj), None);
+    }
+
+    #[test]
+    fn test_is_reverse_of() {
+        // Nodes P and Q 100 m apart east-west, joined by a two-way straight
+        // road (edges 0, 1) and by a one-way arc bulging 30 m north (edge 2).
+        let mut b = RoadNetworkBuilder::new();
+        let deg = 1.0 / 86_500.0;
+        let p = b.get_or_add_node(1, Point::new(0.0, 39.0));
+        let q = b.get_or_add_node(2, Point::new(100.0 * deg, 39.0));
+        let straight =
+            |from: f64, to: f64| LineString::from(vec![(from * deg, 39.0), (to * deg, 39.0)]);
+        let arc = LineString::from(vec![
+            (100.0 * deg, 39.0),
+            (50.0 * deg, 39.0 + 30.0 / 111_000.0),
+            (0.0, 39.0),
+        ]);
+        let edge = |id, g| Edge::new(id, g, Frc::Frc4, Fow::SingleCarriageway);
+        let pq = b.add_edge(p, q, edge(0, straight(0.0, 100.0)));
+        let qp = b.add_edge(q, p, edge(1, straight(100.0, 0.0)));
+        let qp_arc = b.add_edge(q, p, edge(2, arc));
+        let net = b.finish();
+
+        assert!(net.is_reverse_of(pq, qp));
+        assert!(net.is_reverse_of(qp, pq));
+        assert!(
+            !net.is_reverse_of(pq, qp_arc),
+            "a loop half is a different road"
+        );
+        assert!(!net.is_reverse_of(pq, pq));
+        assert!(!net.is_reverse_of(qp, qp_arc), "same direction");
     }
 }

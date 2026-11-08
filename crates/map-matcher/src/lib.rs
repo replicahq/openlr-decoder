@@ -85,7 +85,7 @@ pub struct MatchConfig {
     /// Log-score cost of a route that turns from an edge straight onto its
     /// reverse. Without it, jitter at a stop pulls the match onto a nearby side
     /// road and back. On real 15 s pings the default 2.0 cut matched u-turns
-    /// from 947 to 523 and kept 39 of the 42 where the heading reverses. On
+    /// from 847 to 454 and kept 39 of the 42 where the heading reverses. On
     /// synthetic traces it doubled the share matched entirely correctly.
     pub uturn_penalty: f64,
     /// Only edges of this road class or more important are matched.
