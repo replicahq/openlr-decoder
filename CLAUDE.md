@@ -244,6 +244,7 @@ config = DecoderConfig(
     frc_tolerance=2,          # Allow ±2 FRC class difference
     snap_to_valid_nodes=True, # Extend path ends to junctions (OpenLR Rule 4)
     max_snap_extension_m=25.0,
+    max_junction_completion_m=15.0, # Carry the end to the next location's start; 0 disables
 )
 ```
 
@@ -264,6 +265,29 @@ having a junction our OSM car graph lacks (measured on the KC corpus: the guard 
 all ~100 such overshoots while keeping every extension that landed on HERE's endpoint). Because the offset then spans more
 than one edge, `*_offset_fraction` (relative to the first/last edge) can exceed 1.0;
 the meter offsets are authoritative.
+
+### Chained locations (issue #65)
+
+Arity chains locations end to start: the last LRP of one is the first LRP of the
+next, encoded separately and up to a couple of meters apart. Every edge between
+them should belong to exactly one location. Two mechanisms in `decoder.rs` serve this:
+
+- `slide_past_pass_through`: a same-edge match whose LRP projection clamps to a
+  pass-through end of the edge is moved along the forced chain onto the edge the
+  LRP lies on (or to the next junction), counted as covered.
+- `complete_junction`: where HERE has one junction and OSM splits it into nodes a
+  few meters apart, the path end is carried forward, as covered length, to where a
+  location starting at the last LRP would begin (the farthest of its forward
+  candidates within 1 m of the nearest, LRP within 5 m of the road). Capped by
+  `max_junction_completion_m` and the length tolerance. Only the upstream location
+  extends; `length` includes the extension. Widening the 1 m tolerance recovers
+  more lost edges but makes about as many owned by both locations. Skipped when
+  the code has an encoded negative offset: that location ends inside its last
+  segment, and its cut is measured back from the path end.
+
+To measure tiling, pair codes from `model-159019.arity.geoid_pairs` whose boundary
+LRPs are within 3 m and 30°, decode both, and check the along-network gap between
+up's end and dn's start and the edges neither covers by ≥50%.
 
 ## Comment Style
 
