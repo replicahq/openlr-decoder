@@ -85,7 +85,7 @@ See the [Configuration Guide](https://replicahq.github.io/openlr-decoder/configu
 
 ## Spec Deviations
 
-Built for HERE-encoded codes: last-LRP bearing is matched in travel direction, encoded offsets are ignored, and only line locations are fully supported. See `CLAUDE.md` for details.
+Built for HERE-encoded codes: last-LRP bearing is matched in travel direction, encoded offsets are scaled to the decoded length, and only line locations are fully supported. See `CLAUDE.md` for details.
 
 ## License
 

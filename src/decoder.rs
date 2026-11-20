@@ -199,13 +199,17 @@ pub struct DecodedPath {
     /// Stable edge ids, in travel order.
     pub edge_ids: Vec<u64>,
     pub edge_lengths_m: Vec<f64>,
-    /// Meters from the first LRP's projection to the last's. This includes the
-    /// partial terminal edges that were too short to keep in `edge_ids` and
-    /// excludes any terminal-node snap.
+    /// Meters of the location: from the first LRP's projection to the last's,
+    /// less the line's encoded offsets. This includes the partial terminal
+    /// edges that were too short to keep in `edge_ids` and excludes any
+    /// terminal-node snap.
     pub length_m: f64,
-    /// Meters to trim from the start of the first edge to reach the first LRP.
+    /// Meters to trim from the start of the first edge to reach the start of
+    /// the location: the first LRP's projection plus the encoded positive
+    /// offset. Edges wholly inside it are not in `edge_ids`.
     pub positive_offset_m: f64,
-    /// Meters to trim from the end of the last edge to reach the last LRP.
+    /// Meters to trim from the end of the last edge to reach the end of the
+    /// location. See `positive_offset_m`.
     pub negative_offset_m: f64,
     /// `positive_offset_m` over the first edge's length. Exceeds 1.0 when a
     /// terminal-node snap prepended edges; the meter value is authoritative.
@@ -236,6 +240,23 @@ struct PathResult {
     start_offset_m: f64,
     /// Meters from the second LRP's projection to the end of the last edge.
     end_offset_m: f64,
+}
+
+/// Take `positive_m` off the front and `negative_m` off the back of travel-order
+/// coverages, leaving each entry's coverage at least 0.
+fn trim_coverages(coverages: &mut [(EdgeIndex, f64)], positive_m: f64, negative_m: f64) {
+    fn take<'a>(mut remaining: f64, entries: impl Iterator<Item = &'a mut (EdgeIndex, f64)>) {
+        for (_, coverage_m) in entries {
+            if remaining <= 0.0 {
+                break;
+            }
+            let taken = remaining.min(*coverage_m);
+            *coverage_m -= taken;
+            remaining -= taken;
+        }
+    }
+    take(positive_m, coverages.iter_mut());
+    take(negative_m, coverages.iter_mut().rev());
 }
 
 /// One LRP-to-LRP segment's lengths and offsets, all in meters. Used to bound
@@ -396,9 +417,9 @@ impl<'a> Decoder<'a> {
 
     /// Snap the ends of `path` to valid nodes and compute its offsets.
     ///
-    /// The offsets are the LRP projections onto the terminal edges, not the
-    /// encoded offsets of whitepaper §12.10: no HERE code in the KC corpus has
-    /// one, and edge-relative offsets are what OSM consumers need.
+    /// The offsets are the LRP projections onto the terminal edges.
+    /// [`apply_encoded_offsets`](Self::apply_encoded_offsets) adds a line's
+    /// encoded offsets on top.
     fn finalize_path(
         &self,
         path: &mut Vec<EdgeIndex>,
@@ -451,6 +472,16 @@ impl<'a> Decoder<'a> {
             }
         }
 
+        self.path_offsets(path, positive_offset_m, negative_offset_m)
+    }
+
+    /// [`PathOffsets`] with the fractions taken over the first and last edge.
+    fn path_offsets(
+        &self,
+        path: &[EdgeIndex],
+        positive_offset_m: f64,
+        negative_offset_m: f64,
+    ) -> PathOffsets {
         let frac = |offset_m: f64, edge_idx: Option<&EdgeIndex>| {
             edge_idx
                 .and_then(|&idx| self.network.edge(idx))
@@ -465,6 +496,68 @@ impl<'a> Decoder<'a> {
             positive_offset_fraction: frac(positive_offset_m, path.first()),
             negative_offset_fraction: frac(negative_offset_m, path.last()),
         }
+    }
+
+    /// Add a line's encoded offsets (whitepaper §12.10) to the offsets from
+    /// [`finalize_path`](Self::finalize_path), and drop the edges that end up
+    /// outside the location. At least one edge is kept.
+    ///
+    /// Each offset is `(meters, tolerance_m)`. The edge a cut lands on counts as
+    /// outside when it reaches less than `tolerance_m` into the location. With
+    /// one quantization bucket as the tolerance, a cut encoded at a junction
+    /// doesn't leave a sliver of the next edge. An end with no encoded offset
+    /// is left as it is, so it keeps its terminal-node snap.
+    fn apply_encoded_offsets(
+        &self,
+        path: &mut Vec<EdgeIndex>,
+        offsets: PathOffsets,
+        (encoded_positive_m, positive_tolerance_m): (f64, f64),
+        (encoded_negative_m, negative_tolerance_m): (f64, f64),
+    ) -> PathOffsets {
+        if encoded_positive_m <= 0.0 && encoded_negative_m <= 0.0 {
+            return offsets;
+        }
+        let length = |idx: EdgeIndex| self.network.edge(idx).map_or(0.0, |e| e.length_m);
+        // Edges from one end that lie outside `offset_m`, and what is left of
+        // the offset on the first edge kept.
+        let outside = |edges: &mut dyn Iterator<Item = &EdgeIndex>, offset_m: f64, tol_m: f64| {
+            let mut remaining = offset_m;
+            let mut count = 0;
+            for &idx in edges {
+                let len = length(idx);
+                if remaining <= 0.0 || len >= remaining + tol_m {
+                    break;
+                }
+                remaining = (remaining - len).max(0.0);
+                count += 1;
+            }
+            (count, remaining)
+        };
+
+        let mut positive_offset_m = offsets.positive_offset_m;
+        if encoded_positive_m > 0.0 {
+            let keep_one = path.len().saturating_sub(1);
+            let leading;
+            (leading, positive_offset_m) = outside(
+                &mut path.iter().take(keep_one),
+                positive_offset_m + encoded_positive_m,
+                positive_tolerance_m,
+            );
+            path.drain(..leading);
+        }
+        let mut negative_offset_m = offsets.negative_offset_m;
+        if encoded_negative_m > 0.0 {
+            let keep_one = path.len().saturating_sub(1);
+            let trailing;
+            (trailing, negative_offset_m) = outside(
+                &mut path.iter().rev().take(keep_one),
+                negative_offset_m + encoded_negative_m,
+                negative_tolerance_m,
+            );
+            path.truncate(path.len() - trailing);
+        }
+
+        self.path_offsets(path, positive_offset_m, negative_offset_m)
     }
 
     fn edge_ids_and_lengths(&self, indices: &[EdgeIndex]) -> (Vec<u64>, Vec<f64>) {
@@ -547,9 +640,8 @@ impl<'a> Decoder<'a> {
 
         let mut full_path: Vec<EdgeIndex> = Vec::new();
         let mut total_length = 0.0;
-        // Summed per edge, in first-traversal order so primary-edge ties resolve
-        // deterministically.
-        let mut edge_coverages: Vec<(EdgeIndex, f64)> = Vec::new();
+        // In travel order, one entry per segment traversal.
+        let mut path_coverages: Vec<(EdgeIndex, f64)> = Vec::new();
         let mut first_segment = SegmentInfo::default();
         let mut last_segment = SegmentInfo::default();
 
@@ -585,15 +677,12 @@ impl<'a> Decoder<'a> {
             }
             last_segment = seg;
 
-            for coverage in &path_result.coverages {
-                match edge_coverages
-                    .iter_mut()
-                    .find(|(idx, _)| *idx == coverage.edge_idx)
-                {
-                    Some((_, total)) => *total += coverage.coverage_m,
-                    None => edge_coverages.push((coverage.edge_idx, coverage.coverage_m)),
-                }
-            }
+            path_coverages.extend(
+                path_result
+                    .coverages
+                    .iter()
+                    .map(|c| (c.edge_idx, c.coverage_m)),
+            );
 
             // Consecutive segments share the edge under their common LRP.
             for (j, &edge_idx) in path_result.edges.iter().enumerate() {
@@ -604,6 +693,25 @@ impl<'a> Decoder<'a> {
             }
         }
 
+        // The encoded offsets are fractions of the first and last segment's DNP
+        // (§12.10). Scaling them by the decoded segment length instead keeps
+        // the cut points proportional when OSM and HERE lengths differ. Sibling
+        // Arity geoid_portion codes share their LRPs and differ only here.
+        let encoded_positive_m =
+            (line.offsets.pos.range() * first_segment.length_m).clamp(0.0, total_length);
+        let encoded_negative_m = (line.offsets.neg.range() * last_segment.length_m)
+            .clamp(0.0, total_length - encoded_positive_m);
+        trim_coverages(&mut path_coverages, encoded_positive_m, encoded_negative_m);
+
+        // Summed per edge, in first-traversal order so primary-edge ties resolve
+        // deterministically.
+        let mut edge_coverages: Vec<(EdgeIndex, f64)> = Vec::new();
+        for (edge_idx, coverage_m) in path_coverages {
+            match edge_coverages.iter_mut().find(|(idx, _)| *idx == edge_idx) {
+                Some((_, total)) => *total += coverage_m,
+                None => edge_coverages.push((edge_idx, coverage_m)),
+            }
+        }
         let (primary_edge_id, primary_coverage) =
             self.primary_edge(&edge_coverages)
                 .ok_or(DecodeError::NoPath {
@@ -623,12 +731,24 @@ impl<'a> Decoder<'a> {
             first_segment,
             last_segment,
         );
+        let offsets = self.apply_encoded_offsets(
+            &mut full_path,
+            offsets,
+            (
+                encoded_positive_m,
+                first_segment.length_m / openlr::Offset::BUCKETS,
+            ),
+            (
+                encoded_negative_m,
+                last_segment.length_m / openlr::Offset::BUCKETS,
+            ),
+        );
 
         let (edge_ids, edge_lengths_m) = self.edge_ids_and_lengths(&full_path);
         Ok(DecodedPath {
             edge_ids,
             edge_lengths_m,
-            length_m: total_length,
+            length_m: total_length - encoded_positive_m - encoded_negative_m,
             positive_offset_m: offsets.positive_offset_m,
             negative_offset_m: offsets.negative_offset_m,
             positive_offset_fraction: offsets.positive_offset_fraction,
@@ -2031,6 +2151,69 @@ mod tests {
         assert!((offsets.negative_offset_fraction - 1.0).abs() < 1e-6);
         // N1 is a dead end, so valid.
         assert!(offsets.positive_offset_m.abs() < 1e-6);
+    }
+
+    /// An encoded offset at one end must not undo the snap at the other: the
+    /// snap-extension edge lies wholly inside its offset by construction.
+    #[test]
+    fn test_encoded_offset_keeps_snap_at_other_end() {
+        let (network, spatial) = snap_network();
+        let decoder = Decoder::new(&network, &spatial);
+        let mut path = vec![edge_by_id(&network, 1), edge_by_id(&network, 2)];
+        let coord = |node| network.node(node).unwrap().coord;
+        let n1 = coord(network.edge_source(path[0]).unwrap());
+        let n4 = coord(network.edge_target(edge_by_id(&network, 3)).unwrap());
+        let seg = SegmentInfo {
+            length_m: 200.0,
+            expected_m: 200.0,
+            ..SegmentInfo::default()
+        };
+        let offsets = decoder.finalize_path(&mut path, n1, n4, seg, seg);
+        assert_eq!(ids(&network, &path), vec![1, 2, 3]);
+
+        let tol = 200.0 / openlr::Offset::BUCKETS;
+        let offsets = decoder.apply_encoded_offsets(&mut path, offsets, (50.0, tol), (0.0, tol));
+
+        assert_eq!(ids(&network, &path), vec![1, 2, 3]);
+        assert!((offsets.positive_offset_m - 50.0).abs() < 1e-6);
+        assert!((offsets.negative_offset_m - 15.0).abs() < 1e-6);
+    }
+
+    /// The tolerance applies only to the edge a cut lands on. A short edge just
+    /// past the cut is inside the location and must be kept.
+    #[test]
+    fn test_encoded_offset_keeps_short_edge_after_cut() {
+        let (network, spatial) = TestNetworkBuilder::new()
+            .add_node(1, 0.0, 0.0)
+            .add_node(2, 0.0, 0.009)
+            .add_node(3, 0.0, 0.00905)
+            .add_node(4, 0.0, 0.018)
+            .add_edge(1, 1, 2, 1000.0, Frc::Frc4, Fow::SingleCarriageway)
+            .add_edge(2, 2, 3, 5.0, Frc::Frc4, Fow::SingleCarriageway)
+            .add_edge(3, 3, 4, 1000.0, Frc::Frc4, Fow::SingleCarriageway)
+            .build();
+        let decoder = Decoder::new(&network, &spatial);
+        let all = || {
+            (1..=3)
+                .map(|id| edge_by_id(&network, id))
+                .collect::<Vec<_>>()
+        };
+        let tol = 2005.0 / openlr::Offset::BUCKETS; // about 7.8 m, more than e2
+        assert!(tol > 5.0);
+
+        // A cut quantized 0.5 m short of N2, from either side.
+        let mut rest = all();
+        decoder.apply_encoded_offsets(&mut rest, PathOffsets::default(), (999.5, tol), (0.0, tol));
+        let mut first = all();
+        decoder.apply_encoded_offsets(
+            &mut first,
+            PathOffsets::default(),
+            (0.0, tol),
+            (1005.5, tol),
+        );
+
+        assert_eq!(ids(&network, &first), vec![1]);
+        assert_eq!(ids(&network, &rest), vec![2, 3]);
     }
 
     #[test]

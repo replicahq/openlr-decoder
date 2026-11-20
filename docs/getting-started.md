@@ -59,9 +59,9 @@ The returned [`DecodedPath`](api-reference.md#decodedpath) contains:
 | Property | Description |
 |----------|-------------|
 | `edge_ids` | List of edge IDs forming the decoded path |
-| `length` | Total path length in meters |
-| `positive_offset` | Distance (m) from start of first edge to the first LRP projection |
-| `negative_offset` | Distance (m) from last LRP projection to end of last edge |
+| `length` | Length of the location in meters, after any encoded offsets |
+| `positive_offset` | Distance (m) from start of first edge to the start of the location (first LRP projection plus any encoded positive offset) |
+| `negative_offset` | Distance (m) from the end of the location to the end of last edge |
 | `positive_offset_fraction` | Fraction (0-1) along first edge where the path starts |
 | `negative_offset_fraction` | Fraction (0-1) along last edge measured from end |
 | `primary_edge_id` | Edge ID covering the most distance in the path |
