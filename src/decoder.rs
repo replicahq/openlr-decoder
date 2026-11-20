@@ -890,8 +890,71 @@ impl<'a> Decoder<'a> {
         Some((self.network.edge(idx)?.id, coverage))
     }
 
+    /// Where an LRP whose projection clamps to a pass-through end of its edge
+    /// really lies. Walks the forced chain away from the edge (backward from the
+    /// start for the first LRP, forward from the end for the last) until the
+    /// LRP projects inside an edge or the chain reaches a junction. Returns the
+    /// walked edges, nearest first, and the LRP's projection fraction on the
+    /// last of them. `None` when the projection isn't clamped, the clamped end
+    /// is already a junction, or the walk would end farther from the LRP.
+    ///
+    /// A clamped projection at a junction is just the LRP sitting on the node.
+    /// At a pass-through node the road goes on without a choice, so the LRP
+    /// lies further along it. Stopping at the node instead leaves the edges in
+    /// between to neither of two chained locations that share the LRP (#65).
+    fn slide_past_pass_through(
+        &self,
+        cand: &Candidate,
+        candidates: &[Candidate],
+        backward: bool,
+    ) -> Option<(Vec<EdgeIndex>, f64)> {
+        let is_clamped = |c: &Candidate| {
+            if backward {
+                c.projection_fraction <= 0.0
+            } else {
+                c.projection_fraction >= 1.0
+            }
+        };
+        if !is_clamped(cand) {
+            return None;
+        }
+        let mut walked: Vec<EdgeIndex> = Vec::new();
+        let mut from = cand.edge_idx;
+        loop {
+            let next = if backward {
+                let node = self.network.edge_source(from)?;
+                self.network.forced_predecessor(node, from)
+            } else {
+                let node = self.network.edge_target(from)?;
+                self.network.forced_continuation(node, from)
+            };
+            let Some(next) = next else {
+                break; // reached a junction with the LRP still beyond it
+            };
+            if next == cand.edge_idx || walked.contains(&next) {
+                return None;
+            }
+            // The walk stays among the LRP's candidates, which keeps it within
+            // the search radius and lets it compare distances.
+            let c = candidates.iter().find(|c| c.edge_idx == next)?;
+            if c.distance_m > cand.distance_m {
+                break;
+            }
+            walked.push(next);
+            if !is_clamped(c) {
+                return Some((walked, c.projection_fraction));
+            }
+            from = next;
+        }
+        let clamped_at = if backward { 0.0 } else { 1.0 };
+        (!walked.is_empty()).then_some((walked, clamped_at))
+    }
+
     /// Best single-edge path where both LRPs project within 10 m of the same
-    /// edge, start before end.
+    /// edge, start before end. A projection clamped to a pass-through end of
+    /// the edge is first moved onto the edge the LRP lies on (see
+    /// [`slide_past_pass_through`](Self::slide_past_pass_through)), so the
+    /// path may come back with more than one edge.
     fn try_same_edge_solution(
         &self,
         start_candidates: &[Candidate],
@@ -903,8 +966,7 @@ impl<'a> Decoder<'a> {
     ) -> Option<PathResult> {
         const MAX_PROJECTION_DISTANCE: f64 = 10.0;
 
-        // (edge_idx, length, start_offset_m, end_offset_m, score)
-        let mut best_same_edge: Option<(EdgeIndex, f64, f64, f64, f64)> = None;
+        let mut best: Option<(PathResult, f64)> = None;
 
         for start_cand in start_candidates.iter().take(10) {
             if start_cand.distance_m > MAX_PROJECTION_DISTANCE {
@@ -935,7 +997,54 @@ impl<'a> Decoder<'a> {
                     continue;
                 }
 
-                let path_cost = edge.length_m * frac_diff;
+                let head = self.slide_past_pass_through(start_cand, start_candidates, true);
+                let tail = self.slide_past_pass_through(end_cand, end_candidates, false);
+                // On a loop the two walks can meet; leave both ends clamped then.
+                let (head, tail) = match (head, tail) {
+                    (Some(h), Some(t)) if h.0.iter().any(|e| t.0.contains(e)) => (None, None),
+                    ends => ends,
+                };
+                let start_fraction = head
+                    .as_ref()
+                    .map_or(start_cand.projection_fraction, |h| h.1);
+                let end_fraction = tail.as_ref().map_or(end_cand.projection_fraction, |t| t.1);
+
+                let mut edges: Vec<EdgeIndex> = Vec::new();
+                let mut coverages: Vec<EdgeCoverage> = Vec::new();
+                let mut push = |edge_idx: EdgeIndex, coverage_m: f64| {
+                    edges.push(edge_idx);
+                    coverages.push(EdgeCoverage {
+                        edge_idx,
+                        coverage_m,
+                    });
+                };
+                let length_of = |idx: EdgeIndex| self.network.edge(idx).map_or(0.0, |e| e.length_m);
+                if let Some((walked, _)) = &head {
+                    let (&first, between) = walked.split_last()?;
+                    push(first, length_of(first) * (1.0 - start_fraction));
+                    for &idx in between.iter().rev() {
+                        push(idx, length_of(idx));
+                    }
+                }
+                let from = if head.is_some() {
+                    0.0
+                } else {
+                    start_cand.projection_fraction
+                };
+                let to = if tail.is_some() {
+                    1.0
+                } else {
+                    end_cand.projection_fraction
+                };
+                push(start_cand.edge_idx, edge.length_m * (to - from));
+                if let Some((walked, _)) = &tail {
+                    let (&last, between) = walked.split_last()?;
+                    for &idx in between {
+                        push(idx, length_of(idx));
+                    }
+                    push(last, length_of(last) * end_fraction);
+                }
+                let path_cost: f64 = coverages.iter().map(|c| c.coverage_m).sum();
 
                 // With both LRPs within 5 m of the edge, trust the geometry over
                 // the DNP: drop the minimum and triple the maximum. DNP quantization
@@ -955,30 +1064,22 @@ impl<'a> Decoder<'a> {
                     (path_cost - expected_distance).abs() / expected_distance.max(1.0);
                 let score = start_cand.score + end_cand.score + length_diff;
 
-                if best_same_edge.is_none() || score < best_same_edge.as_ref().unwrap().4 {
-                    best_same_edge = Some((
-                        start_cand.edge_idx,
-                        path_cost,
-                        edge.length_m * start_cand.projection_fraction,
-                        edge.length_m * (1.0 - end_cand.projection_fraction),
-                        score,
-                    ));
+                if best.as_ref().is_none_or(|b| score < b.1) {
+                    let first_len = length_of(edges[0]);
+                    let last_len = length_of(*edges.last()?);
+                    let path = PathResult {
+                        start_offset_m: first_len * start_fraction,
+                        end_offset_m: last_len * (1.0 - end_fraction),
+                        edges,
+                        coverages,
+                        total_length: path_cost,
+                    };
+                    best = Some((path, score));
                 }
             }
         }
 
-        best_same_edge.map(
-            |(edge_idx, length, start_offset_m, end_offset_m, _score)| PathResult {
-                edges: vec![edge_idx],
-                coverages: vec![EdgeCoverage {
-                    edge_idx,
-                    coverage_m: length,
-                }],
-                total_length: length,
-                start_offset_m,
-                end_offset_m,
-            },
-        )
+        best.map(|(path, _)| path)
     }
 
     /// Best path from one of `start_candidates` to one of `end_candidates` whose
@@ -1160,14 +1261,20 @@ impl<'a> Decoder<'a> {
             // Drop a terminal edge that contributes under 3% of the path, which
             // happens when its LRP sits at a junction. Its partial still counts
             // in path_cost, and the path then starts (ends) at offset 0 on the
-            // next edge in.
+            // next edge in. An edge the path covers at least half of is kept
+            // however short: the LRP lies on it, and a location chained onto
+            // this one would leave it to neither (#65).
             const MIN_EDGE_CONTRIBUTION: f64 = 0.03;
+            let keep_terminal = |partial_m: f64, edge_length_m: f64| {
+                partial_m / path_cost >= MIN_EDGE_CONTRIBUTION
+                    || (partial_m > 0.0 && partial_m >= 0.5 * edge_length_m)
+            };
             let mut edges = Vec::new();
             let mut coverages = Vec::new();
             let mut start_offset_m = 0.0;
             let mut end_offset_m = 0.0;
 
-            if start_edge_partial / path_cost >= MIN_EDGE_CONTRIBUTION {
+            if keep_terminal(start_edge_partial, start_edge.length_m) {
                 start_offset_m = start_edge.length_m * start_cand.projection_fraction;
                 edges.push(start_cand.edge_idx);
                 coverages.push(EdgeCoverage {
@@ -1186,7 +1293,7 @@ impl<'a> Decoder<'a> {
                 }
             }
 
-            if end_edge_partial / path_cost >= MIN_EDGE_CONTRIBUTION {
+            if keep_terminal(end_edge_partial, end_edge.length_m) {
                 end_offset_m = end_edge.length_m * (1.0 - end_cand.projection_fraction);
                 edges.push(end_cand.edge_idx);
                 coverages.push(EdgeCoverage {
@@ -1233,6 +1340,138 @@ mod tests {
     /// Offsets are relative to the terminal edges path finding keeps. A dropped
     /// terminal edge means offset 0 on the next edge in, not a projection that
     /// clamps to the far end and lets the offsets cross.
+    fn candidate_at(edge_idx: EdgeIndex, projection_fraction: f64, distance_m: f64) -> Candidate {
+        Candidate {
+            edge_idx,
+            distance_m,
+            bearing_diff: 0.0,
+            frc_diff: 0,
+            fow_score: 1.0,
+            score: distance_m / 10.0,
+            projection_fraction,
+        }
+    }
+
+    /// 1 -e1(40)-> 2 -e2(30)-> 3 -e3(40)-> 4, all northbound. Node 3 is a
+    /// junction (e4 branches off). With `junction_at_2`, so is node 2.
+    fn chain_network(junction_at_2: bool) -> (RoadNetwork, SpatialIndex) {
+        let mut b = TestNetworkBuilder::new()
+            .add_node(1, 0.0, 0.0)
+            .add_node(2, 0.00036, 0.0)
+            .add_node(3, 0.00063, 0.0)
+            .add_node(4, 0.00099, 0.0)
+            .add_node(5, 0.00063, 0.001)
+            .add_node(6, 0.00036, 0.001)
+            .add_edge(1, 1, 2, 40.0, Frc::Frc4, Fow::SingleCarriageway)
+            .add_edge(2, 2, 3, 30.0, Frc::Frc4, Fow::SingleCarriageway)
+            .add_edge(3, 3, 4, 40.0, Frc::Frc4, Fow::SingleCarriageway)
+            .add_edge(4, 3, 5, 80.0, Frc::Frc4, Fow::SingleCarriageway);
+        if junction_at_2 {
+            b = b.add_edge(5, 2, 6, 80.0, Frc::Frc4, Fow::SingleCarriageway);
+        }
+        b.build()
+    }
+
+    /// A first LRP 4 m before pass-through node 2 clamps to the start of e2.
+    /// The same-edge match slides it back onto e1 rather than starting at
+    /// node 2, which a location ending at that LRP would also reach (#65).
+    #[test]
+    fn test_same_edge_slides_clamped_start_past_pass_through_node() {
+        let (network, spatial) = chain_network(false);
+        let decoder = Decoder::new(&network, &spatial);
+        let idx = |id| network.find_edge_by_id(id).unwrap();
+
+        let start = [
+            candidate_at(idx(2), 0.0, 4.0),
+            candidate_at(idx(1), 0.9, 0.5),
+        ];
+        let end = [candidate_at(idx(2), 0.8, 0.5)];
+        let result = decoder.find_best_path(&start, &end, 29.3, 0, None).unwrap();
+
+        assert_eq!(result.edges, vec![idx(1), idx(2)]);
+        assert!((result.start_offset_m - 36.0).abs() < 1e-9);
+        assert!((result.total_length - 28.0).abs() < 1e-9);
+        assert!((result.coverages[0].coverage_m - 4.0).abs() < 1e-9);
+    }
+
+    /// A last LRP past pass-through node 2 slides forward along e2 the same way,
+    /// and stops at junction 3 if it lies beyond that too.
+    #[test]
+    fn test_same_edge_slides_clamped_end_to_next_junction() {
+        let (network, spatial) = chain_network(false);
+        let decoder = Decoder::new(&network, &spatial);
+        let idx = |id| network.find_edge_by_id(id).unwrap();
+
+        let start = [candidate_at(idx(1), 0.2, 0.5)];
+        let end = [
+            candidate_at(idx(1), 1.0, 6.0),
+            candidate_at(idx(2), 1.0, 3.0),
+        ];
+        let result = decoder.find_best_path(&start, &end, 29.3, 0, None).unwrap();
+
+        assert_eq!(result.edges, vec![idx(1), idx(2)]);
+        assert_eq!(result.end_offset_m, 0.0);
+        assert!((result.total_length - 62.0).abs() < 1e-9);
+    }
+
+    /// At a junction a clamped projection is the LRP sitting on the node, so
+    /// the path stays on the one edge.
+    #[test]
+    fn test_same_edge_keeps_clamped_start_at_junction() {
+        let (network, spatial) = chain_network(true);
+        let decoder = Decoder::new(&network, &spatial);
+        let idx = |id| network.find_edge_by_id(id).unwrap();
+
+        let start = [
+            candidate_at(idx(2), 0.0, 4.0),
+            candidate_at(idx(1), 0.9, 0.5),
+        ];
+        let end = [candidate_at(idx(2), 0.8, 0.5)];
+        let result = decoder.find_best_path(&start, &end, 29.3, 0, None).unwrap();
+
+        assert_eq!(result.edges, vec![idx(2)]);
+        assert_eq!(result.start_offset_m, 0.0);
+    }
+
+    /// A terminal edge under 3% of the path is still kept when the path covers
+    /// at least half of it: the LRP lies on it.
+    #[test]
+    fn test_find_best_path_keeps_mostly_covered_short_terminal_edge() {
+        let (network, spatial) = TestNetworkBuilder::new()
+            .add_node(1, 0.0, 0.0)
+            .add_node(2, 0.0009, 0.0)
+            .add_node(3, 0.000905, 0.0)
+            .add_edge(1, 1, 2, 100.0, Frc::Frc4, Fow::SingleCarriageway)
+            .add_edge(2, 2, 3, 0.6, Frc::Frc4, Fow::SingleCarriageway)
+            .build();
+        let decoder = Decoder::new(&network, &spatial);
+        let idx = |id| network.find_edge_by_id(id).unwrap();
+
+        let result = decoder
+            .find_best_path(
+                &[candidate_at(idx(1), 0.0, 0.0)],
+                &[candidate_at(idx(2), 0.6, 0.0)],
+                100.0,
+                0,
+                None,
+            )
+            .unwrap();
+        assert_eq!(result.edges, vec![idx(1), idx(2)]);
+        assert!((result.end_offset_m - 0.24).abs() < 1e-9);
+
+        // Under half covered, it is dropped as before.
+        let result = decoder
+            .find_best_path(
+                &[candidate_at(idx(1), 0.0, 0.0)],
+                &[candidate_at(idx(2), 0.4, 0.0)],
+                100.0,
+                0,
+                None,
+            )
+            .unwrap();
+        assert_eq!(result.edges, vec![idx(1)]);
+    }
+
     #[test]
     fn test_find_best_path_offsets_follow_kept_terminal_edges() {
         let (network, spatial) = TestNetworkBuilder::new()

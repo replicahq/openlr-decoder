@@ -84,8 +84,12 @@ def reconstruct_path_geometry(
 
     line = LineString(coords)
 
-    # Apply offsets
-    total_length = line.length
+    # Cut in a local metric frame. In raw degrees a degree of longitude is
+    # shorter than one of latitude, so a fraction of the path's degree length
+    # lands tens of meters off once the path mixes long E-W and N-S edges.
+    lon_scale = np.cos(np.radians(line.centroid.y))
+    metric = LineString([(x * lon_scale, y) for x, y in coords])
+    total_length = metric.length
     if total_length == 0:
         return line
 
@@ -96,7 +100,8 @@ def reconstruct_path_geometry(
         start_dist = start_frac * total_length
         end_dist = end_frac * total_length
         if end_dist > start_dist:
-            line = substring(line, start_dist, end_dist)
+            cut = substring(metric, start_dist, end_dist)
+            line = LineString([(x / lon_scale, y) for x, y in cut.coords])
 
     return line
 
