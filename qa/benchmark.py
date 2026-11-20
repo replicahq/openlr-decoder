@@ -2,9 +2,10 @@
 """
 OpenLR decoder QA benchmark.
 
-Decodes a corpus of OpenLR codes, compares decoded paths against HERE reference
+Decodes a corpus of OpenLR codes, compares decoded paths against reference
 geometries using Hausdorff and Fréchet distance, and saves results for
-before/after comparison.
+before/after comparison. The default corpus is qa/golden_portions.csv (see
+qa/build_golden_set.py); qa/test_codes.csv is the older HERE-chord corpus.
 
 Usage:
     # Run benchmark and save results
@@ -31,6 +32,10 @@ from shapely import frechet_distance, Point
 from shapely.ops import substring
 
 import openlr_decoder
+
+
+# Columns from qa/golden_portions.csv carried into the results, when present.
+CORPUS_COLUMNS = ("geo_id", "stratum", "weight", "reference_source")
 
 
 def load_test_codes(csv_path: str) -> list[dict]:
@@ -220,6 +225,9 @@ def run_benchmark(
             "positive_offset_frac": pos_frac,
             "negative_offset_frac": neg_frac,
         }
+        for col in CORPUS_COLUMNS:
+            if col in tc:
+                result[col] = tc[col]
 
         # Compute geometric metrics for successful decodes
         if result["success"]:
@@ -238,26 +246,33 @@ def run_benchmark(
         results.append(result)
 
     # Save results
-    out_table = pa.table(
-        {
-            "openlr_code": [r["openlr_code"] for r in results],
-            "success": [r["success"] for r in results],
-            "error": [r["error"] for r in results],
-            "edge_ids": [r["edge_ids"] for r in results],
-            "n_edges": [r["n_edges"] for r in results],
-            "length_m": [r["length_m"] for r in results],
-            "primary_edge_id": [r["primary_edge_id"] for r in results],
-            "positive_offset_frac": [r["positive_offset_frac"] for r in results],
-            "negative_offset_frac": [r["negative_offset_frac"] for r in results],
-            "hausdorff_m": [r["hausdorff_m"] for r in results],
-            "frechet_m": [r["frechet_m"] for r in results],
-            "length_ratio": [r["length_ratio"] for r in results],
-        }
-    )
+    out_table = pa.table({key: [r[key] for r in results] for key in results[0]})
 
     pq.write_table(out_table, output_path)
     print(f"\nResults saved to {output_path}")
     print_summary(results)
+
+
+def print_breakdown(results: list[dict]):
+    """Per stratum and reference source, for corpora built by build_golden_set.py.
+
+    Hausdorff against a chord reference is only meaningful for straight links,
+    so read those rows separately from the Orbis ones.
+    """
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for r in results:
+        groups.setdefault((r["reference_source"], r["stratum"]), []).append(r)
+    print("\n  By reference source and stratum:")
+    print(f"    {'source':7s} {'stratum':15s} {'codes':>6s} {'decoded':>8s} {'H p50':>6s} {'H p90':>6s} {'good':>6s}")
+    for (source, stratum), rows in sorted(groups.items()):
+        h = np.array([r["hausdorff_m"] for r in rows if r["hausdorff_m"] is not None])
+        decoded = sum(r["success"] for r in rows) / len(rows)
+        stats = (
+            f"{np.median(h):6.1f} {np.percentile(h, 90):6.1f} {100 * (h < 30).mean():5.1f}%"
+            if len(h)
+            else ""
+        )
+        print(f"    {source:7s} {stratum:15s} {len(rows):6d} {100 * decoded:7.1f}% {stats}")
 
 
 def print_summary(results: list[dict]):
@@ -305,6 +320,9 @@ def print_summary(results: list[dict]):
         print(f"    Good  (<30m):   {good:5d} ({100 * good / len(h):.1f}%)")
         print(f"    OK    (30-100m):{ok:5d} ({100 * ok / len(h):.1f}%)")
         print(f"    Bad   (>100m):  {bad:5d} ({100 * bad / len(h):.1f}%)")
+
+    if results and "stratum" in results[0]:
+        print_breakdown(results)
 
     print(f"{'=' * 60}")
 
@@ -417,7 +435,7 @@ def diff_results(before_path: str, after_path: str):
 def main():
     parser = argparse.ArgumentParser(description="OpenLR decoder QA benchmark")
     parser.add_argument(
-        "--codes", default="qa/test_codes.csv", help="Path to test codes CSV"
+        "--codes", default="qa/golden_portions.csv", help="Path to test codes CSV"
     )
     parser.add_argument(
         "--network", default="openlr_test_edges.parquet", help="Path to network parquet"
