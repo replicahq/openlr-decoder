@@ -502,10 +502,11 @@ impl<'a> Decoder<'a> {
     /// [`finalize_path`](Self::finalize_path), and drop the edges that end up
     /// outside the location. At least one edge is kept.
     ///
-    /// Each offset is `(meters, tolerance_m)`. An edge counts as outside when it
-    /// reaches less than `tolerance_m` into the location. With one quantization
-    /// bucket as the tolerance, a cut encoded at a junction doesn't leave a
-    /// sliver of the next edge.
+    /// Each offset is `(meters, tolerance_m)`. The edge a cut lands on counts as
+    /// outside when it reaches less than `tolerance_m` into the location. With
+    /// one quantization bucket as the tolerance, a cut encoded at a junction
+    /// doesn't leave a sliver of the next edge. An end with no encoded offset
+    /// is left as it is, so it keeps its terminal-node snap.
     fn apply_encoded_offsets(
         &self,
         path: &mut Vec<EdgeIndex>,
@@ -524,7 +525,7 @@ impl<'a> Decoder<'a> {
             let mut count = 0;
             for &idx in edges {
                 let len = length(idx);
-                if len >= remaining + tol_m {
+                if remaining <= 0.0 || len >= remaining + tol_m {
                     break;
                 }
                 remaining = (remaining - len).max(0.0);
@@ -533,20 +534,28 @@ impl<'a> Decoder<'a> {
             (count, remaining)
         };
 
-        let keep_one = path.len().saturating_sub(1);
-        let (leading, positive_offset_m) = outside(
-            &mut path.iter().take(keep_one),
-            offsets.positive_offset_m + encoded_positive_m,
-            positive_tolerance_m,
-        );
-        path.drain(..leading);
-        let keep_one = path.len().saturating_sub(1);
-        let (trailing, negative_offset_m) = outside(
-            &mut path.iter().rev().take(keep_one),
-            offsets.negative_offset_m + encoded_negative_m,
-            negative_tolerance_m,
-        );
-        path.truncate(path.len() - trailing);
+        let mut positive_offset_m = offsets.positive_offset_m;
+        if encoded_positive_m > 0.0 {
+            let keep_one = path.len().saturating_sub(1);
+            let leading;
+            (leading, positive_offset_m) = outside(
+                &mut path.iter().take(keep_one),
+                positive_offset_m + encoded_positive_m,
+                positive_tolerance_m,
+            );
+            path.drain(..leading);
+        }
+        let mut negative_offset_m = offsets.negative_offset_m;
+        if encoded_negative_m > 0.0 {
+            let keep_one = path.len().saturating_sub(1);
+            let trailing;
+            (trailing, negative_offset_m) = outside(
+                &mut path.iter().rev().take(keep_one),
+                negative_offset_m + encoded_negative_m,
+                negative_tolerance_m,
+            );
+            path.truncate(path.len() - trailing);
+        }
 
         self.path_offsets(path, positive_offset_m, negative_offset_m)
     }
@@ -2142,6 +2151,69 @@ mod tests {
         assert!((offsets.negative_offset_fraction - 1.0).abs() < 1e-6);
         // N1 is a dead end, so valid.
         assert!(offsets.positive_offset_m.abs() < 1e-6);
+    }
+
+    /// An encoded offset at one end must not undo the snap at the other: the
+    /// snap-extension edge lies wholly inside its offset by construction.
+    #[test]
+    fn test_encoded_offset_keeps_snap_at_other_end() {
+        let (network, spatial) = snap_network();
+        let decoder = Decoder::new(&network, &spatial);
+        let mut path = vec![edge_by_id(&network, 1), edge_by_id(&network, 2)];
+        let coord = |node| network.node(node).unwrap().coord;
+        let n1 = coord(network.edge_source(path[0]).unwrap());
+        let n4 = coord(network.edge_target(edge_by_id(&network, 3)).unwrap());
+        let seg = SegmentInfo {
+            length_m: 200.0,
+            expected_m: 200.0,
+            ..SegmentInfo::default()
+        };
+        let offsets = decoder.finalize_path(&mut path, n1, n4, seg, seg);
+        assert_eq!(ids(&network, &path), vec![1, 2, 3]);
+
+        let tol = 200.0 / openlr::Offset::BUCKETS;
+        let offsets = decoder.apply_encoded_offsets(&mut path, offsets, (50.0, tol), (0.0, tol));
+
+        assert_eq!(ids(&network, &path), vec![1, 2, 3]);
+        assert!((offsets.positive_offset_m - 50.0).abs() < 1e-6);
+        assert!((offsets.negative_offset_m - 15.0).abs() < 1e-6);
+    }
+
+    /// The tolerance applies only to the edge a cut lands on. A short edge just
+    /// past the cut is inside the location and must be kept.
+    #[test]
+    fn test_encoded_offset_keeps_short_edge_after_cut() {
+        let (network, spatial) = TestNetworkBuilder::new()
+            .add_node(1, 0.0, 0.0)
+            .add_node(2, 0.0, 0.009)
+            .add_node(3, 0.0, 0.00905)
+            .add_node(4, 0.0, 0.018)
+            .add_edge(1, 1, 2, 1000.0, Frc::Frc4, Fow::SingleCarriageway)
+            .add_edge(2, 2, 3, 5.0, Frc::Frc4, Fow::SingleCarriageway)
+            .add_edge(3, 3, 4, 1000.0, Frc::Frc4, Fow::SingleCarriageway)
+            .build();
+        let decoder = Decoder::new(&network, &spatial);
+        let all = || {
+            (1..=3)
+                .map(|id| edge_by_id(&network, id))
+                .collect::<Vec<_>>()
+        };
+        let tol = 2005.0 / openlr::Offset::BUCKETS; // about 7.8 m, more than e2
+        assert!(tol > 5.0);
+
+        // A cut quantized 0.5 m short of N2, from either side.
+        let mut rest = all();
+        decoder.apply_encoded_offsets(&mut rest, PathOffsets::default(), (999.5, tol), (0.0, tol));
+        let mut first = all();
+        decoder.apply_encoded_offsets(
+            &mut first,
+            PathOffsets::default(),
+            (0.0, tol),
+            (1005.5, tol),
+        );
+
+        assert_eq!(ids(&network, &first), vec![1]);
+        assert_eq!(ids(&network, &rest), vec![2, 3]);
     }
 
     #[test]
