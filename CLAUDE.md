@@ -297,7 +297,7 @@ uv run uvicorn app:app
 
 ## QA Benchmarking
 
-The `qa/` directory contains tooling for measuring decode quality across a 48K-code corpus from the Kansas City metro area. It compares decoded OSM paths against HERE reference geometries using Hausdorff and Fréchet distance.
+The `qa/` directory contains tooling for measuring decode quality across a 49K-code corpus from the Kansas City metro area. It compares decoded OSM paths against reference geometries using Hausdorff and Fréchet distance.
 
 **IMPORTANT**: The benchmark must use `~/openlr-web/.venv/bin/python` directly — do NOT use `uv run` from the openlr-web directory, as it will reinstall openlr-decoder from PyPI and overwrite your local build.
 
@@ -329,7 +329,35 @@ cd ~/openlr-web && uv pip install --reinstall ~/openlr-decoder/target/wheels/ope
 
 ### Test corpus
 
-`qa/test_codes.csv` contains ~48K OpenLR codes with HERE reference geometries (from `bqutils.geo.openlr_to_geography`), randomly sampled from `model-159019.michelin.arity_link_matches_usa_v2` within the KC bounding box (38.53–39.11°N, 95.15–94.47°W). Network: `~/openlr-web/openlr_test_edges.parquet` (487K edges, `startOsmNode`/`endOsmNode`
+`qa/golden_portions.csv` is the default corpus. It holds 49,007 codes from
+`model-159019.arity.geoid_pairs` in the KC bounding box (38.53–39.11°N,
+95.15–94.47°W), the table production decodes:
+
+- **Sampling.** Parents (`geo_id`) are sampled by stratum (`slip_road`, five
+  DNP buckets, and the `shared_portion` codes listed under more than one
+  `geo_id`), and every portion of each sampled parent is kept. `weight`
+  scales a stratum back to the KC population.
+- **Offsets.** 33,814 of the codes are portions with encoded offsets.
+- **Reference geometry.** `reference_source=orbis` (76% of parents) is the
+  shortest TomTom Orbis path between the LRPs. It is kept only when its length
+  fits the DNP bucket and no equally well-snapped route differs, then trimmed
+  by the portion's offsets. Otherwise the reference is the start-to-end chord.
+  Orbis is built on OSM, so where the route matches, the geometry nearly
+  matches ours. Treat it as a check on route choice, not on geometry.
+- **Reading the numbers.** Read chord rows separately, because a chord is only
+  right for a straight link. `shared_portion` codes are ambiguous by
+  construction: one code, several links.
+
+Rebuild it with `qa/build_golden_set.py` (its docstring has the `uvx` command;
+the BigQuery pulls cost about 30 GB). The benchmark prints a breakdown by
+reference source and stratum. Production decodes with
+`--config max_candidate_distance_m=25 max_bearing_diff=90`.
+
+`qa/test_codes.csv` is the older corpus: ~48K whole-link codes without
+offsets, from `model-159019.michelin.arity_link_matches_usa_v2`, with chord
+references. Pass it with `--codes` to compare against old results.
+
+Network: `~/openlr-web/openlr_test_edges.parquet` (487K edges, `startOsmNode`/`endOsmNode`
 ids). Regenerate it from BigQuery with `qa/regenerate_network.py` (run with the
 openlr-web venv python); it pulls the KC bbox from
 `model-159019.tomtom.tomtom_segments_updated_street_export_2025_Q2_1_5_0`.
