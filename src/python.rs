@@ -188,6 +188,11 @@ pub struct PyDecoderConfig {
     /// Longest extension in meters that `snap_to_valid_nodes` may add at each end.
     #[pyo3(get, set)]
     pub max_snap_extension_m: f64,
+    /// Longest extension in meters that carries the path's end, as covered
+    /// length, to where a location starting at the last LRP would begin, so
+    /// chained locations tile across split junctions. 0 disables.
+    #[pyo3(get, set)]
+    pub max_junction_completion_m: f64,
 }
 
 #[pymethods]
@@ -209,7 +214,8 @@ impl PyDecoderConfig {
         slip_road_cost_penalty = 20.0,
         access_road_cost_penalty = 10.0,
         snap_to_valid_nodes = true,
-        max_snap_extension_m = 25.0
+        max_snap_extension_m = 25.0,
+        max_junction_completion_m = 15.0
     ))]
     // Python keyword arguments, one per config field.
     #[allow(clippy::too_many_arguments)]
@@ -230,6 +236,7 @@ impl PyDecoderConfig {
         access_road_cost_penalty: f64,
         snap_to_valid_nodes: bool,
         max_snap_extension_m: f64,
+        max_junction_completion_m: f64,
     ) -> Self {
         PyDecoderConfig {
             search_radius_m,
@@ -248,6 +255,7 @@ impl PyDecoderConfig {
             access_road_cost_penalty,
             snap_to_valid_nodes,
             max_snap_extension_m,
+            max_junction_completion_m,
         }
     }
 
@@ -258,7 +266,8 @@ impl PyDecoderConfig {
              absolute_length_tolerance={}, max_search_distance_factor={}, \
              distance_weight={}, bearing_weight={}, frc_weight={}, fow_weight={}, \
              slip_road_cost_penalty={}, access_road_cost_penalty={}, \
-             snap_to_valid_nodes={}, max_snap_extension_m={})",
+             snap_to_valid_nodes={}, max_snap_extension_m={}, \
+             max_junction_completion_m={})",
             self.search_radius_m,
             self.max_bearing_diff,
             self.frc_tolerance,
@@ -274,7 +283,8 @@ impl PyDecoderConfig {
             self.slip_road_cost_penalty,
             self.access_road_cost_penalty,
             self.snap_to_valid_nodes,
-            self.max_snap_extension_m
+            self.max_snap_extension_m,
+            self.max_junction_completion_m
         )
     }
 }
@@ -300,6 +310,7 @@ impl From<&PyDecoderConfig> for DecoderConfig {
             access_road_cost_penalty: config.access_road_cost_penalty,
             snap_to_valid_nodes: config.snap_to_valid_nodes,
             max_snap_extension_m: config.max_snap_extension_m,
+            max_junction_completion_m: config.max_junction_completion_m,
         }
     }
 }
@@ -313,9 +324,10 @@ pub struct PyDecodedPath {
     /// Full length of each edge in `edge_ids`.
     #[pyo3(get)]
     pub edge_lengths: Vec<f64>,
-    /// Length of the location along the path, from the first LRP to the last.
-    /// This excludes the offsets, and includes any start or end edge under 3%
-    /// of the path that was left out of `edge_ids`.
+    /// Length of the location along the path, from the first LRP to the last
+    /// plus any junction completion (`max_junction_completion_m`). This excludes
+    /// the offsets, and includes any start or end edge under 3% of the path that
+    /// was left out of `edge_ids`.
     #[pyo3(get)]
     pub length: f64,
     /// Length to trim from the start of the path to where the location begins.

@@ -200,9 +200,10 @@ pub struct DecodedPath {
     pub edge_ids: Vec<u64>,
     pub edge_lengths_m: Vec<f64>,
     /// Meters of the location: from the first LRP's projection to the last's,
-    /// less the line's encoded offsets. This includes the partial terminal
-    /// edges that were too short to keep in `edge_ids` and excludes any
-    /// terminal-node snap.
+    /// plus any junction completion (see
+    /// [`DecoderConfig::max_junction_completion_m`]), less the line's encoded
+    /// offsets. This includes the partial terminal edges that were too short
+    /// to keep in `edge_ids` and excludes any terminal-node snap.
     pub length_m: f64,
     /// Meters to trim from the start of the first edge to reach the start of
     /// the location: the first LRP's projection plus the encoded positive
@@ -277,6 +278,13 @@ struct PathOffsets {
     negative_offset_fraction: f64,
 }
 
+/// Meters a candidate may be farther from the last LRP than the nearest one
+/// and still count as where the next location starts. Chained LRPs are encoded
+/// separately and land up to a couple of meters apart, but on 335K chained
+/// Indianapolis pairs each meter of tolerance beyond 1.0 recovered about as
+/// many lost edges as it made doubly owned. See [`Decoder::complete_junction`].
+const JUNCTION_START_TOLERANCE_M: f64 = 1.0;
+
 #[derive(Debug, Clone)]
 pub struct DecoderConfig {
     pub candidate_config: CandidateConfig,
@@ -301,6 +309,10 @@ pub struct DecoderConfig {
     /// HERE links are often only 20–40 m long and still stop a ~7–10 m
     /// crossing stub short of the junction.
     pub max_snap_extension_m: f64,
+    /// Meters the end of the path may be carried forward, as covered length,
+    /// to where a location starting at the last LRP would begin. 0 disables.
+    /// See [`Decoder::complete_junction`].
+    pub max_junction_completion_m: f64,
 }
 
 impl Default for DecoderConfig {
@@ -314,6 +326,7 @@ impl Default for DecoderConfig {
             access_road_cost_penalty: 10.0,
             snap_to_valid_nodes: true,
             max_snap_extension_m: 25.0,
+            max_junction_completion_m: 15.0,
         }
     }
 }
@@ -413,6 +426,97 @@ impl<'a> Decoder<'a> {
             added.reverse();
             Some((added, added_m))
         }
+    }
+
+    /// Carry the end of `path` forward to where a location beginning at the
+    /// last LRP would start. `next_starts` are the last LRP's candidates scored
+    /// as a first LRP. Any of them within [`JUNCTION_START_TOLERANCE_M`] of the
+    /// best and within 30 degrees of the bearing could be that start, since
+    /// the next location's LRP is encoded separately and lands nearby. The
+    /// path is carried to the one farthest downstream. Returns the
+    /// meters added: the uncovered rest of the last edge plus the route. `None`
+    /// when nothing needs adding or the extension exceeds
+    /// `max_junction_completion_m` or the segment's length tolerance.
+    ///
+    /// Arity chains locations end to start at a shared LRP. Where HERE has one
+    /// junction and OSM splits it into nodes a few meters apart, the end of one
+    /// location and the start of the next resolve to different nodes and the
+    /// edges between belong to neither (#65). Completing here makes the
+    /// upstream location own them; the downstream location is unchanged.
+    fn complete_junction(
+        &self,
+        path: &mut Vec<EdgeIndex>,
+        last_segment: SegmentInfo,
+        next_starts: &[Candidate],
+    ) -> Option<f64> {
+        const MAX_BEARING_DIFF: f64 = 30.0;
+        // Farther off the network than this, an LRP says little about where
+        // the next location starts. At 10 m, 5 KC codes ended 5 to 9 m past
+        // HERE's endpoint; at 5 m none did, at almost no cost in Indianapolis.
+        const MAX_LRP_DISTANCE_M: f64 = 5.0;
+        let headroom = self.max_valid_distance(last_segment.expected_m) - last_segment.length_m;
+        let cap = self.config.max_junction_completion_m.min(headroom);
+        let rest_m = last_segment.end_offset_m;
+        if cap <= 0.0 || rest_m > cap {
+            return None;
+        }
+        let from = self.network.edge_target(*path.last()?)?;
+        let nearest = next_starts
+            .iter()
+            .map(|c| c.distance_m)
+            .fold(f64::INFINITY, f64::min);
+
+        let mut best: Option<(f64, Vec<EdgeIndex>)> = None;
+        for c in next_starts {
+            if c.distance_m > MAX_LRP_DISTANCE_M
+                || c.distance_m > nearest + JUNCTION_START_TOLERANCE_M
+                || c.bearing_diff > MAX_BEARING_DIFF
+            {
+                continue;
+            }
+            if path.contains(&c.edge_idx) {
+                // Starting partway along our last edge, the next location
+                // already meets this one.
+                if path.last() == Some(&c.edge_idx) && c.projection_fraction < 1.0 {
+                    return None;
+                }
+                continue;
+            }
+            let Some(goal) = self.network.edge_source(c.edge_idx) else {
+                continue;
+            };
+            let route = if goal == from {
+                Some((0.0, Vec::new()))
+            } else {
+                self.network.node(goal).and_then(|n| {
+                    bounded_astar(
+                        self.network,
+                        from,
+                        goal,
+                        n.coord,
+                        cap - rest_m,
+                        &AStarConstraints::default(),
+                    )
+                    .map(|(cost, _, edges)| (cost, edges))
+                })
+            };
+            let Some((route_m, edges)) = route else {
+                continue;
+            };
+            if edges.iter().any(|e| path.contains(e)) {
+                continue;
+            }
+            if best.as_ref().is_none_or(|b| route_m > b.0) {
+                best = Some((route_m, edges));
+            }
+        }
+
+        let (route_m, route) = best?;
+        if rest_m + route_m <= 0.0 {
+            return None;
+        }
+        path.extend(route);
+        Some(rest_m + route_m)
     }
 
     /// Snap the ends of `path` to valid nodes and compute its offsets.
@@ -724,6 +828,30 @@ impl<'a> Decoder<'a> {
             points[points.len() - 1].coordinate.lon,
             points[points.len() - 1].coordinate.lat,
         );
+        let last = &points[points.len() - 1];
+        let next_starts = find_candidates(
+            last_lrp_coord,
+            last.line.bearing.degrees() as f64,
+            Frc::from_u8(last.line.frc.value() as u8),
+            Fow::from_u8(last.line.fow.value() as u8),
+            BearingDirection::Forward,
+            self.network,
+            self.spatial,
+            &self.config.candidate_config,
+        );
+        // A location with an encoded negative offset ends inside its last
+        // segment, not at the LRP a next location would start from. Its cut
+        // is also measured back from the path end, so carrying the end
+        // forward would move the cut.
+        let completed = (encoded_negative_m <= 0.0)
+            .then(|| self.complete_junction(&mut full_path, last_segment, &next_starts))
+            .flatten();
+        if let Some(added_m) = completed {
+            total_length += added_m;
+            last_segment.length_m += added_m;
+            last_segment.end_offset_m = 0.0;
+        }
+
         let offsets = self.finalize_path(
             &mut full_path,
             first_lrp_coord,
@@ -2355,6 +2483,131 @@ mod tests {
 
     fn ids(network: &RoadNetwork, path: &[EdgeIndex]) -> Vec<u64> {
         path.iter().map(|&i| network.edge(i).unwrap().id).collect()
+    }
+
+    /// One HERE junction split into OSM junctions N2 and N3, 1 m apart:
+    /// N1 -e1(40)-> N2 -e2(1)-> N3 -e3(40)-> N4, with side roads e4 at N2 and
+    /// e5 at N3.
+    fn split_junction_network() -> (RoadNetwork, SpatialIndex) {
+        TestNetworkBuilder::new()
+            .add_node(1, 0.0, 0.0)
+            .add_node(2, 0.00036, 0.0)
+            .add_node(3, 0.000369, 0.0)
+            .add_node(4, 0.000729, 0.0)
+            .add_node(5, 0.00036, 0.001)
+            .add_node(6, 0.000369, -0.001)
+            .add_edge(1, 1, 2, 40.0, Frc::Frc4, Fow::SingleCarriageway)
+            .add_edge(2, 2, 3, 1.0, Frc::Frc4, Fow::SingleCarriageway)
+            .add_edge(3, 3, 4, 40.0, Frc::Frc4, Fow::SingleCarriageway)
+            .add_edge(4, 2, 5, 80.0, Frc::Frc4, Fow::SingleCarriageway)
+            .add_edge(5, 3, 6, 80.0, Frc::Frc4, Fow::SingleCarriageway)
+            .build()
+    }
+
+    fn junction_segment(end_offset_m: f64) -> SegmentInfo {
+        SegmentInfo {
+            length_m: 40.0,
+            expected_m: 40.0,
+            start_offset_m: 0.0,
+            end_offset_m,
+        }
+    }
+
+    /// The next location could start on e2 or e3, which are equally close to
+    /// the LRP. The path is carried across e2 to the farther one, so the next
+    /// location starting on e3 leaves no gap.
+    #[test]
+    fn test_complete_junction_carries_path_across_split_junction() {
+        let (network, spatial) = split_junction_network();
+        let decoder = Decoder::new(&network, &spatial);
+        let idx = |id| edge_by_id(&network, id);
+
+        let mut path = vec![idx(1)];
+        let next = [
+            candidate_at(idx(2), 0.5, 0.5),
+            candidate_at(idx(3), 0.0, 1.2),
+        ];
+        let added = decoder.complete_junction(&mut path, junction_segment(0.0), &next);
+
+        assert_eq!(ids(&network, &path), vec![1, 2]);
+        assert_eq!(added, Some(1.0));
+    }
+
+    #[test]
+    fn test_complete_junction_ignores_starts_beyond_tolerance() {
+        let (network, spatial) = split_junction_network();
+        let decoder = Decoder::new(&network, &spatial);
+        let idx = |id| edge_by_id(&network, id);
+
+        // e3 is 1.5 m farther than e2, and e2 starts where the path ends.
+        let mut path = vec![idx(1)];
+        let next = [
+            candidate_at(idx(2), 0.5, 0.5),
+            candidate_at(idx(3), 0.0, 2.0),
+        ];
+        assert_eq!(
+            decoder.complete_junction(&mut path, junction_segment(0.0), &next),
+            None
+        );
+        assert_eq!(ids(&network, &path), vec![1]);
+
+        // An LRP 8 m off the road says nothing about the next start.
+        let next = [candidate_at(idx(3), 0.0, 8.0)];
+        assert_eq!(
+            decoder.complete_junction(&mut path, junction_segment(0.0), &next),
+            None
+        );
+    }
+
+    /// A next location starting partway along the last edge already meets
+    /// this one.
+    #[test]
+    fn test_complete_junction_noop_when_next_starts_on_last_edge() {
+        let (network, spatial) = split_junction_network();
+        let decoder = Decoder::new(&network, &spatial);
+        let idx = |id| edge_by_id(&network, id);
+
+        let mut path = vec![idx(1)];
+        let next = [
+            candidate_at(idx(1), 0.9, 0.5),
+            candidate_at(idx(3), 0.0, 1.0),
+        ];
+        assert_eq!(
+            decoder.complete_junction(&mut path, junction_segment(4.0), &next),
+            None
+        );
+        assert_eq!(ids(&network, &path), vec![1]);
+    }
+
+    /// The uncovered rest of the last edge counts toward the cap, and 0
+    /// disables completion.
+    #[test]
+    fn test_complete_junction_respects_cap() {
+        let (network, spatial) = split_junction_network();
+        let idx = |id| edge_by_id(&network, id);
+        let next = [candidate_at(idx(3), 0.0, 0.5)];
+
+        let decoder = Decoder::new(&network, &spatial);
+        let mut path = vec![idx(1)];
+        let added = decoder.complete_junction(&mut path, junction_segment(3.0), &next);
+        assert_eq!(added, Some(4.0));
+        assert_eq!(ids(&network, &path), vec![1, 2]);
+
+        let mut path = vec![idx(1)];
+        assert_eq!(
+            decoder.complete_junction(&mut path, junction_segment(14.5), &next),
+            None
+        );
+
+        let decoder = Decoder::new(&network, &spatial).with_config(DecoderConfig {
+            max_junction_completion_m: 0.0,
+            ..DecoderConfig::default()
+        });
+        let mut path = vec![idx(1)];
+        assert_eq!(
+            decoder.complete_junction(&mut path, junction_segment(0.0), &next),
+            None
+        );
     }
 
     #[test]
