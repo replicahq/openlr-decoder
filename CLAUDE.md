@@ -139,7 +139,6 @@ Verified against the 47,931-code KC corpus where noted.
 
 **Follows HERE, not the spec**
 - **Last-LRP bearing** is matched in the travel direction. The spec (§5.2.4, Table 74) points it *back* along the incoming line. HERE uses travel direction in 100% of corpus codes; spec-conformant encoders (e.g. TomTom) will fail the ±90° filter on the last LRP.
-- **Encoded offsets are ignored** (0 of 47,931 corpus codes have one). `positive_offset`/`negative_offset` on the result are the first/last LRP's projection distance onto the first/last edge — not the spec's offsets.
 
 **Not implemented**
 - **≥3 LRPs**: segments are solved pairwise; the intermediate LRP is not forced onto one shared edge (§12.1 Step 5). Untested — corpus is all 2-LRP.
@@ -148,6 +147,7 @@ Verified against the 47,931-code KC corpus where noted.
 - GeoCoordinate, POI, area types and ClosedLine are unsupported.
 
 **Easy to misread**
+- **Encoded offsets** (§12.10) are fractions of the first/last segment's DNP in the spec. We scale them by the *decoded* segment length, so cut points stay proportional when OSM and HERE lengths differ. Edges that reach less than one offset bucket (1/256 of the segment) into the location are dropped, so a cut encoded at a junction leaves no sliver. `positive_offset`/`negative_offset` on the result are the meters to trim from the first/last kept edge: the LRP projection plus any snap and encoded offset. The KC corpus has no offsets, but every Arity `geoid_portion` that differs from its `geo_id` does (#66).
 - `max_candidate_distance_m` gates the decode on *one* LRP having a close candidate; others may match up to `search_radius_m`.
 - Start/end edges under 3% of the path are dropped from `edge_ids` but still counted in `length`.
 
